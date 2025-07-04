@@ -538,6 +538,12 @@ in
         '';
       };
 
+      suppressGreeting = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Suppress the greeting message in interactive shells.";
+      };
+
       shellInitLast = mkOption {
         type = types.lines;
         default = "";
@@ -768,6 +774,9 @@ in
           end
 
           status is-interactive; and begin
+
+            # Suppress greeting
+            ${lib.optionalString cfg.suppressGreeting "set fish_greeting"}
 
             # Abbreviations
             ${abbrsStr}
