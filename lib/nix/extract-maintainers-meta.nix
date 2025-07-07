@@ -1,53 +1,52 @@
 # Extract maintainers from Home Manager modules using meta.maintainers
 # This script evaluates all Home Manager modules and extracts the merged maintainer information
 let
-  nixpkgs = import <nixpkgs> { };
-  lib = import ../../modules/lib/stdlib-extended.nix nixpkgs.lib;
+  pkgs = import <nixpkgs> { };
+  lib = import ../../modules/lib/stdlib-extended.nix pkgs.lib;
+  releaseInfo = pkgs.lib.importJSON ../../release.json;
 
-  # Scrub derivations to avoid instantiating them during evaluation
-  scrubDerivations =
-    prefixPath: attrs:
-    let
-      scrubDerivation =
-        name: value:
+  docsLib = import ../../docs {
+    inherit lib pkgs;
+    inherit (releaseInfo) release isReleaseBranch;
+  };
+
+  moduleMaintainersJson = builtins.fromJSON (builtins.readFile docsLib.jsonModuleMaintainers);
+  maintainers = moduleMaintainersJson;
+
+  additionalFiles = [
+    ../../docs/home-manager-manual.nix
+  ];
+
+  extractAdditionalMaintainers =
+    files:
+    lib.concatLists (
+      map (
+        file:
         let
-          pkgAttrName = prefixPath + "." + name;
+          fileContent = import file;
+          evaluated =
+            if lib.isFunction fileContent then
+              fileContent {
+                inherit (pkgs) stdenv lib;
+                documentation-highlighter = { };
+                revision = "unknown";
+                home-manager-options = {
+                  home-manager = { };
+                  nixos = { };
+                  nix-darwin = { };
+                };
+                nixos-render-docs = { };
+              }
+            else
+              fileContent;
+
+          maintainersList = evaluated.meta.maintainers or [ ];
         in
-        if lib.isAttrs value then
-          scrubDerivations pkgAttrName value
-          // lib.optionalAttrs (lib.isDerivation value) {
-            outPath = "\${${pkgAttrName}}";
-          }
-        else
-          value;
-    in
-    lib.mapAttrs scrubDerivation attrs;
+        if lib.isList maintainersList then maintainersList else [ maintainersList ]
+      ) files
+    );
 
-  # Make sure the used package is scrubbed to avoid instantiating derivations
-  scrubbedPkgsModule = {
-    imports = [
-      {
-        _module.args = {
-          pkgs = lib.mkForce (scrubDerivations "pkgs" nixpkgs);
-          pkgs_i686 = lib.mkForce { };
-        };
-      }
-    ];
-  };
-
-  # Evaluate all Home Manager modules
-  hmModules = lib.evalModules {
-    modules =
-      import ../../modules/modules.nix {
-        inherit lib;
-        pkgs = nixpkgs;
-        check = false;
-      }
-      ++ [ scrubbedPkgsModule ];
-    class = "homeManager";
-  };
-
-  inherit (hmModules.config.meta) maintainers;
+  additionalMaintainerObjects = extractAdditionalMaintainers additionalFiles;
 
   extractMaintainerObjects =
     maintainerData:
@@ -57,7 +56,7 @@ let
       lib.unique
     ];
 
-  allMaintainerObjects = extractMaintainerObjects maintainers;
+  allMaintainerObjects = extractMaintainerObjects maintainers ++ additionalMaintainerObjects;
 
   getMaintainerName = maintainer: maintainer.github or maintainer.name or null;
 
@@ -87,17 +86,15 @@ let
   formatMaintainer =
     name: info: source:
     let
-      # Handle identifiers that start with numbers or contain invalid characters
       quotedName =
         if lib.match "[0-9].*" name != null || lib.match "[^a-zA-Z0-9_-].*" name != null then
           ''"${name}"''
         else
           name;
 
-      # Filter out internal fields
       filteredInfo = lib.filterAttrs (k: v: !lib.hasPrefix "_" k) info;
     in
-    "  # ${source}\n  ${quotedName} = ${
+    "  ${quotedName} = ${
         lib.generators.toPretty {
           multiline = true;
           indent = "    ";
