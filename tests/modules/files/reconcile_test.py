@@ -1,5 +1,7 @@
 """Run with python3 -m unittest discover -s tests/modules/files -p '*_test.py'."""
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -34,6 +36,62 @@ class Reconciliation(unittest.TestCase):
 
     def activate(self, old, new):
         r.apply(self.home, r.check(self.home, old, new))
+
+    def notice_output(self, operation):
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), contextlib.redirect_stdout(output):
+            operation()
+        return output.getvalue()
+
+    def test_local_notice_once_per_contents_and_declaration(self):
+        old = self.generation("old", b"size=20\n")
+        self.live.write_bytes(b"size=24\n")
+        before = r.snapshot(self.live)
+        first = self.notice_output(lambda: r.report_status(self.home, old, old))
+        self.assertIn("LOCAL CHANGES:", first)
+        again = self.notice_output(lambda: r.report_status(self.home, old, old))
+        self.assertNotIn("LOCAL CHANGES:", again)
+        self.assertIn("1 file(s) have previously reported", again)
+        self.assertEqual(r.snapshot(self.live), before)
+        verbose = self.notice_output(lambda: r.report_status(self.home, old, old, verbose=True))
+        self.assertIn("LOCAL CHANGES:", verbose)
+        self.live.write_bytes(b"size=25\n")
+        changed = self.notice_output(lambda: r.report_status(self.home, old, old))
+        self.assertIn("LOCAL CHANGES:", changed)
+        new = self.generation("new", b"size=22\n")
+        changed_base = self.notice_output(lambda: r.report_status(self.home, new, new))
+        self.assertIn("LOCAL CHANGES:", changed_base)
+
+    def test_preflight_does_not_acknowledge_notices(self):
+        old = self.generation("old", b"size=20\n")
+        self.live.write_bytes(b"size=24\n")
+        plan = r.check(self.home, old, old)
+        self.assertFalse((self.home / ".local/state").exists())
+        output = self.notice_output(lambda: r.apply(self.home, plan))
+        self.assertIn("LOCAL CHANGES:", output)
+        output = self.notice_output(lambda: r.apply(self.home, r.check(self.home, old, old)))
+        self.assertNotIn("LOCAL CHANGES:", output)
+
+    def test_notification_history_does_not_suppress_conflicts(self):
+        old = self.generation("old", b"size=20\n")
+        new = self.generation("new", b"size=30\n")
+        self.live.write_bytes(b"size=24\n")
+        self.notice_output(lambda: r.report_status(self.home, old, old))
+        before = r.snapshot(self.live)
+        with self.assertRaises(r.Divergence):
+            r.report_status(self.home, old, new)
+        self.assertEqual(r.snapshot(self.live), before)
+
+    def test_broken_notification_cache_is_nonfatal(self):
+        old = self.generation("old", b"size=20\n")
+        self.live.write_bytes(b"size=24\n")
+        cache = self.home / ".local/state/home-manager/reconciliation/notices"
+        cache.parent.mkdir(parents=True)
+        cache.symlink_to(self.root)
+        output = self.notice_output(lambda: r.report_status(self.home, old, old))
+        self.assertIn("LOCAL CHANGES:", output)
+        self.assertIn("Could not remember", output)
+        self.assertFalse((self.root / (r.digest(b"config") + ".json")).exists())
 
     def test_create(self):
         self.activate("", self.generation("new", b"hello\n"))

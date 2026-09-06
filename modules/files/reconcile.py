@@ -323,6 +323,7 @@ def check(home, old, new):
     for name in sorted(previous | current):
         path = name
         approval = None
+        local_notice = None
         try:
             path = target(home, name)
             desired_path = Path(new) / "home-files" / name
@@ -363,20 +364,62 @@ def check(home, old, new):
                     print(f"RESOLUTION APPROVED: {path}\nBackup: {approval['backup']}", file=sys.stderr)
                 if not approval and live != desired:
                     if result == live:
-                        print(f"LOCAL CHANGES: {path}\n"
-                              "Preserving live edits that differ from the declarative configuration.",
-                              file=sys.stderr)
+                        local_notice = {"live": digest(live), "declared": digest(desired)}
                     elif live != base:
                         print(f"MERGE READY: {path}\n"
                               "Live edits and declarative changes merge cleanly; result will be installed during activation.",
                               file=sys.stderr)
             plan.append({"name": name, "before": state, "result": encode(result), "mode": mode,
-                         "approval": approval})
+                         "approval": approval, "local_notice": local_notice})
         except (Divergence, OSError, ValueError) as error:
             raise Divergence(f"DIVERGENCE: {path}\n"
                              f"File was not modified. {error}"
                              + resolution_guidance(old, new, name)) from error
     return plan
+
+
+def report_local_changes(home, plan, verbose=False):
+    """Notification cache only: never consulted when deciding file contents."""
+    known = 0
+    for entry in plan:
+        fingerprint = entry.get("local_notice")
+        if fingerprint is None:
+            continue
+        try:
+            cache = target(home, ".local/state/home-manager/reconciliation/notices/"
+                           + digest(os.fsencode(entry["name"])) + ".json")
+            cached = snapshot(cache)
+            previous = (json.loads(base64.b64decode(cached["data"]))
+                        if cached and "data" in cached else None)
+        except (Divergence, OSError, ValueError):
+            previous = None
+        if previous == fingerprint and not verbose:
+            known += 1
+            continue
+        print(f"LOCAL CHANGES: {target(home, entry['name'])}\n"
+              "Preserving live edits that differ from the declarative configuration.",
+              file=sys.stderr, flush=True)
+        # Persist only after printing, outside preflight. Cache failures must
+        # never fail reconciliation or suppress the next notification.
+        temporary = None
+        try:
+            cache = target(home, ".local/state/home-manager/reconciliation/notices/"
+                           + digest(os.fsencode(entry["name"])) + ".json")
+            cache.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            cached = snapshot(cache)
+            if cached is not None and "data" not in cached:
+                raise Divergence("notification cache is not a regular file")
+            fd, temporary = tempfile.mkstemp(prefix=".notice-", dir=cache.parent)
+            with os.fdopen(fd, "w") as stream:
+                json.dump(fingerprint, stream)
+            os.replace(temporary, cache)
+        except (Divergence, OSError, ValueError) as error:
+            print(f"Could not remember local-change notice: {error}", file=sys.stderr)
+        finally:
+            if temporary is not None and os.path.exists(temporary):
+                os.unlink(temporary)
+    if known:
+        print(f"Reconciliation: {known} file(s) have previously reported local changes.", file=sys.stderr)
 
 
 def apply(home, plan):
@@ -409,6 +452,7 @@ def apply(home, plan):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+    report_local_changes(home, plan)
 
 
 def consume_approval(home, entry):
@@ -420,9 +464,10 @@ def consume_approval(home, entry):
                 path.unlink()
 
 
-def report_status(home, old, new):
+def report_status(home, old, new, verbose=False):
     """Inspect reconciliation without installing files or consuming approvals."""
     plan = check(home, old, new)
+    report_local_changes(home, plan, verbose=verbose)
     pending = [entry for entry in plan if entry.get("approval")]
     updates = [entry for entry in plan
                if (entry["before"] or {}).get("data") != entry["result"]]
@@ -433,7 +478,7 @@ def report_status(home, old, new):
     elif not any(entry["result"] != encode((Path(new) / "home-files" / entry["name"]).read_bytes())
                  for entry in plan):
         print("Reconciled files match the declaration.")
-    print("Read-only check complete; no files were installed and no approvals were consumed.")
+    print("Check complete; no managed files were installed and no approvals were consumed. Notification history updated.")
 
 
 if __name__ == "__main__":
@@ -451,6 +496,7 @@ if __name__ == "__main__":
         elif sys.argv[1] == "resolve":
             parser = argparse.ArgumentParser(description="Check reconciliation, or back up and approve one file for activation.")
             parser.add_argument("--generation", required=True)
+            parser.add_argument("--verbose", action="store_true", help="with --check, list all local changes")
             choice = parser.add_mutually_exclusive_group(required=True)
             choice.add_argument("--replace", action="store_true")
             choice.add_argument("--check", action="store_true", help="read-only check of all reconciled files")
@@ -458,6 +504,8 @@ if __name__ == "__main__":
             choice.add_argument("--accept", action="store_true", help="review and approve an exported workspace")
             parser.add_argument("file", nargs="?", help="absolute path, or path relative to HOME")
             args = parser.parse_args(sys.argv[2:])
+            if args.verbose and not args.check:
+                parser.error("--verbose requires --check")
             if args.check and args.file is not None:
                 parser.error("--check checks all files and does not accept a file argument")
             if not args.check and args.file is None:
@@ -466,7 +514,7 @@ if __name__ == "__main__":
             state_home = Path(os.environ.get("XDG_STATE_HOME", str(Path(home) / ".local/state")))
             old = state_home / "home-manager/gcroots/current-home"
             if args.check:
-                report_status(home, str(old.resolve()) if old.exists() else "", args.generation)
+                report_status(home, str(old.resolve()) if old.exists() else "", args.generation, verbose=args.verbose)
             elif args.export or args.accept:
                 operation = export_conflict if args.export else accept_conflict
                 operation(home, str(old.resolve()) if old.exists() else "", args.generation, args.file)
