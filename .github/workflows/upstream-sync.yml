@@ -1,121 +1,33 @@
-name: Daily upstream sync
+name: Validate upstream sync
 
 on:
-  schedule:
-    # 09:17 UTC: 05:17 Toronto in summer, 04:17 in winter.
-    - cron: "17 9 * * *"
-  workflow_dispatch:
-    inputs:
-      guidance:
-        description: Decision or instructions for resolving an upstream conflict
-        type: string
-        default: ""
-      dry_run:
-        description: Prepare and validate, without publishing a PR or issue
-        type: boolean
-        default: false
-  issue_comment:
-    types: [created]
-  push:
-    branches: [automation/daily-upstream-sync]
+  pull_request:
+    branches: [master]
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
-  group: daily-upstream-sync
-  cancel-in-progress: false
+  group: upstream-sync-validation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  prepare:
+  validate:
     if: >-
       github.repository == 'jacobmichels/home-manager' &&
-      (github.event_name != 'issue_comment' ||
-       (github.event.comment.user.login == 'jacobmichels' &&
-        github.event.issue.user.login == 'github-actions[bot]' &&
-        !github.event.issue.pull_request &&
-        contains(github.event.issue.body, '<!-- home-manager-upstream-sync -->') &&
-        startsWith(github.event.comment.body, '/upstream-sync')))
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-    env:
-      HAS_OPENAI_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
-    outputs:
-      status: ${{ steps.finish.outputs.status || steps.prepare.outputs.status }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          path: automation
-          persist-credentials: false
-      - name: Test sync orchestration
-        run: python3 -m unittest discover -s automation/.github/upstream-sync -p 'test_*.py' -v
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: master
-          path: repo
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Prepare merge
-        id: prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SYNC_GUIDANCE: ${{ inputs.guidance }}
-        run: python3 automation/.github/upstream-sync/sync.py prepare --repo repo --state "$RUNNER_TEMP/sync-state"
-      - name: Resolve conflicts with Codex
-        id: codex
-        if: steps.prepare.outputs.status == 'conflict' && github.event_name != 'push' && env.HAS_OPENAI_KEY == 'true'
-        continue-on-error: true
-        timeout-minutes: 15
-        uses: openai/codex-action@f367b1e9572fd064ea71ef925ca24ee0f01080af # v1
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          working-directory: ${{ github.workspace }}/repo
-          prompt-file: ${{ runner.temp }}/sync-state/prompt.md
-          output-file: ${{ runner.temp }}/sync-state/codex.json
-          output-schema-file: ${{ github.workspace }}/automation/.github/upstream-sync/response.schema.json
-          sandbox: workspace-write
-          safety-strategy: drop-sudo
-          model: ${{ vars.CODEX_SYNC_MODEL }}
-      - name: Finalize candidate or escalation
-        id: finish
-        run: python3 automation/.github/upstream-sync/sync.py finish --repo repo --state "$RUNNER_TEMP/sync-state"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: upstream-sync
-          path: ${{ runner.temp }}/sync-state/
-          if-no-files-found: error
-          retention-days: 7
-
-  validate:
-    needs: prepare
-    if: needs.prepare.outputs.status == 'candidate'
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'automation/upstream-sync'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: master
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: upstream-sync
-          path: ${{ runner.temp }}/sync-state
-      - name: Check out merge candidate
-        run: |
-          git bundle verify "$RUNNER_TEMP/sync-state/candidate.bundle"
-          git fetch "$RUNNER_TEMP/sync-state/candidate.bundle" HEAD
-          git checkout --detach FETCH_HEAD
       - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
         with:
           extra_nix_config: |
@@ -127,51 +39,3 @@ jobs:
         run: >-
           nix build --no-link --show-trace
           .#test-fish-suppress-greeting .#test-fish-functions .#docs-jsonModuleMaintainers
-
-  publish:
-    needs: [prepare, validate]
-    if: >-
-      always() && !cancelled() &&
-      github.event_name != 'push' && inputs.dry_run != true &&
-      needs.prepare.result == 'success' &&
-      (needs.prepare.outputs.status == 'candidate' || needs.prepare.outputs.status == 'blocked')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          path: automation
-          persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: master
-          path: repo
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: upstream-sync
-          path: ${{ runner.temp }}/sync-state
-      - name: Configure repository-scoped push key
-        if: needs.prepare.outputs.status == 'candidate'
-        env:
-          SYNC_DEPLOY_KEY: ${{ secrets.UPSTREAM_SYNC_DEPLOY_KEY }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          umask 077
-          test -n "$SYNC_DEPLOY_KEY"
-          printf '%s\n' "$SYNC_DEPLOY_KEY" > "$RUNNER_TEMP/upstream-sync-key"
-          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$RUNNER_TEMP/upstream-sync-known-hosts"
-          git -C repo remote set-url origin git@github.com:jacobmichels/home-manager.git
-      - name: Publish PR or decision issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VALIDATION_RESULT: ${{ needs.validate.result }}
-          GIT_SSH_COMMAND: ssh -i ${{ runner.temp }}/upstream-sync-key -o IdentitiesOnly=yes -o UserKnownHostsFile=${{ runner.temp }}/upstream-sync-known-hosts
-        run: |
-          python3 automation/.github/upstream-sync/sync.py publish --repo repo --state "$RUNNER_TEMP/sync-state"
