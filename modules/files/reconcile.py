@@ -161,6 +161,7 @@ def merge(base, live, desired, prefer_declared=False):
             result.append((i, j, replacement))
         return result
 
+    live_lines = live.splitlines(keepends=True)
     left, right = edits(live), edits(desired)
     subsumed = []
     refined = []
@@ -178,8 +179,16 @@ def merge(base, live, desired, prefer_declared=False):
                         and larger.count(smaller[0]) == 1 and a[i] not in larger):
                     subsumed.append((i, j, smaller))
                     continue
-            # Adjacent replacements are independent. Insertions at the edge of
-            # another edit are ambiguous and deliberately rejected.
+            # A live insertion beside a uniquely retained baseline line can
+            # stay on the same side when that line alone is replaced by Nix.
+            # Do not extend this to deletions, multiline replacements, or
+            # repeated anchors whose alignment could be arbitrary.
+            if (i == j and l == k + 1 and len(other) == 1
+                    and i in (k, l) and a.count(a[k]) == 1
+                    and live_lines.count(a[k]) == 1 and other[0] not in live_lines):
+                continue
+            # Adjacent replacements are independent. Other insertions at the
+            # edge of another edit remain ambiguous and deliberately rejected.
             if max(i, k) < min(j, l) or (i == j and k <= i <= l) or (k == l and i <= k <= j):
                 if prefer_declared:
                     if i == k and j == l and j == i + 1:

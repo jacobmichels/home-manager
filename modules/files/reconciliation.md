@@ -58,8 +58,11 @@ Every activation that preserves contents different from the declaration reports
 reports `MERGE READY` during preflight; installation follows at the write phase.
 These notices also appear during dry runs and do not cause activation to fail.
 Identical edits coalesce. Adjacent replacements are accepted, so changing the
-theme on one line and font size on the next merges. Inserting at the boundary
-of another edit is rejected conservatively. This is a text merge, not a proof
+theme on one line and font size on the next merges. Live insertions immediately
+before or after an unchanged baseline line are preserved when Nix replaces only
+that line. The baseline line must occur exactly once in both baseline and live
+content, and the replacement line must not already occur in live content.
+Other insertions at edit boundaries are rejected conservatively. This is a text merge, not a proof
 of semantic compatibility; it does not understand settings or file formats.
 An agreed single-line replacement also coalesces when one side adds surrounding
 lines in the same diff hunk, provided the agreed line occurs exactly once and
@@ -119,7 +122,7 @@ local edits and surrounding additions, replacing only identifiable conflicting
 lines. Unchanged textual prefixes and suffixes must uniquely align those lines;
 whitespace or punctuation alone is insufficient. Adjacent replacements are
 separated only when all lines align uniquely in both versions. Ambiguous blocks
-and insertion boundaries are refused instead of discarded. This is not a
+and ambiguous insertion boundaries are refused instead of discarded. This is not a
 setting-aware merge and can conservatively reject valid manual resolutions.
 Approvals produced by the older whole-block merge policy are no longer accepted.
 

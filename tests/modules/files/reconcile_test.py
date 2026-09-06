@@ -273,6 +273,45 @@ class Reconciliation(unittest.TestCase):
                                  b"theme=catppuccin\nsize=20\n", prefer_declared=True),
                          b"theme=catppuccin\nsize=20\n")
 
+    def test_live_additions_beside_unchanged_line_update_normally(self):
+        base = b"theme=light\nfont-size=20\n"
+        desired = b"theme=light\nfont-size=30\n"
+        old = self.generation("old", base)
+        new = self.generation("new", desired)
+        for live in (
+            b"theme=light\nmeow=mix\nfont-size=20\n",
+            b"theme=light\nfont-size=20\nhello=world\n",
+            b"foo=bar\ntheme=light\nmeow=mix\nfont-size=20\nhello=world\n",
+        ):
+            with self.subTest(live=live):
+                self.live.write_bytes(live)
+                self.activate(old, new)
+                self.assertEqual(self.live.read_bytes(),
+                                 live.replace(b"font-size=20", b"font-size=30"))
+                self.assertFalse(r.approval_path(self.home, "config").exists())
+
+    def test_shell_additions_stay_on_each_side_of_updated_command(self):
+        base = b'#!/bin/sh\necho old\n'
+        live = b'#!/bin/sh\n# before\necho old\naudit\n'
+        desired = b'#!/bin/sh\necho new\n'
+        for prefer_declared in (False, True):
+            self.assertEqual(r.merge(base, live, desired, prefer_declared=prefer_declared),
+                             b'#!/bin/sh\n# before\necho new\naudit\n')
+
+    def test_boundary_insertion_exception_does_not_hide_ambiguity(self):
+        for base, live, desired in (
+            (b"a\nb\n", b"a\nextra\nb\n", b"a\n"),  # deletion
+            (b"a\nb\n", b"extra\na\nb\n", b"A\nB\n"),  # block replacement
+            (b"a\n", b"extra\na\n", b"other\na\n"),  # competing insertions
+            (b"a\na\n", b"extra\na\na\n", b"A\na\n"),  # repeated anchor
+            (b"a\nb\n", b"extra\na\nb\na\n", b"A\nb\n"),  # duplicated live anchor
+        ):
+            for prefer_declared in (False, True):
+                with self.subTest(base=base, live=live, desired=desired,
+                                  prefer_declared=prefer_declared):
+                    with self.assertRaises(r.Divergence):
+                        r.merge(base, live, desired, prefer_declared=prefer_declared)
+
     def test_shell_independent_function_edits(self):
         base = (b'#!/bin/sh\nprepare() {\n  echo "preparing"\n}\n\n'
                 b'finish() {\n  echo "done"\n}\nprepare\nfinish\n')
