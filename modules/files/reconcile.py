@@ -15,6 +15,7 @@ import stat
 import shlex
 import sys
 import tempfile
+import time
 
 
 class Divergence(Exception):
@@ -178,6 +179,121 @@ def approval_path(home, name):
                   + digest(os.fsencode(name)) + ".json")
 
 
+STATE = ".local/state/home-manager/reconciliation/"
+
+
+def write_record(path, record):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    existing = snapshot(path)
+    if existing is not None and "data" not in existing:
+        raise Divergence("cleanup record is not a regular file")
+    fd, temporary = tempfile.mkstemp(prefix=".record-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(record, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def read_record(path):
+    state = snapshot(path)
+    if state is None or "data" not in state:
+        raise Divergence(f"Missing regular cleanup record: {path}")
+    return json.loads(base64.b64decode(state["data"]))
+
+
+def workspace_snapshot(workspace):
+    if workspace.is_symlink() or not workspace.is_dir():
+        raise Divergence("workspace is not a directory")
+    files = {}
+    for path in workspace.iterdir():
+        state = snapshot(path)
+        if state is None or "data" not in state:
+            raise Divergence("workspace contains a non-regular file")
+        files[path.name] = state
+    return files
+
+
+def record_files(home, directory, pattern):
+    root = target(home, (STATE + directory).rstrip("/"))
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise Divergence("cleanup state directory is not a directory")
+    return sorted(root.glob(pattern))
+
+
+def cleanup(home, dry_run=False, now=None):
+    """Delete only recorded, unchanged artifacts; unknown files stay untouched."""
+    now = time.time() if now is None else now
+    # An unreadable approval must prevent pruning: it may protect any backup.
+    approvals = [read_record(p) for p in record_files(home, "", "*.json")]
+    protected = {approval.get("backup") for approval in approvals}
+    pending_workspaces = {(approval.get("workspace") or {}).get("name") for approval in approvals}
+    groups = {}
+    for record_path in record_files(home, "backups", "*.json"):
+        record = read_record(record_path)
+        live = target(home, record["name"])
+        backup = target(home, record["backup"])
+        if backup.parent != live.parent or not backup.name.startswith(live.name + ".hm-backup-"):
+            raise Divergence("invalid recorded backup path")
+        if snapshot(backup) is not None:
+            groups.setdefault(record["name"], []).append((record_path, record, backup))
+    for entries in groups.values():
+        entries.sort(key=lambda item: (item[1]["created"], item[0].name), reverse=True)
+        for index, (record_path, record, backup) in enumerate(entries):
+            if (index < 3 or now - record["created"] < 30 * 86400
+                    or str(backup) in protected):
+                continue
+            if snapshot(backup) != record["snapshot"]:
+                continue
+            print(f"{'Would remove' if dry_run else 'Removing'} backup: {backup}")
+            if not dry_run:
+                backup.unlink()
+                record_path.unlink()
+    for metadata_path in record_files(home, "workspaces", "conflict-*.json"):
+        metadata = read_record(metadata_path)
+        resolved = metadata.get("resolved")
+        if resolved is None or metadata_path.stem in pending_workspaces:
+            continue
+        workspace = target(home, STATE + "workspaces/" + metadata_path.stem)
+        if workspace_snapshot(workspace) != resolved:
+            continue
+        print(f"{'Would remove' if dry_run else 'Removing'} resolved workspace: {workspace}")
+        if not dry_run:
+            for name in resolved:
+                (workspace / name).unlink()
+            workspace.rmdir()
+            metadata_path.unlink()
+
+
+def finish_activation(home, plan):
+    """Called only after every activation step and generation update succeeded."""
+    try:
+        for entry in plan:
+            approval = entry.get("approval") or {}
+            exported = approval.get("workspace")
+            if not exported:
+                continue
+            live = snapshot(target(home, entry["name"]))
+            if live is None or live.get("data") != entry["result"]:
+                continue
+            workspace = target(home, STATE + "workspaces/" + exported["name"])
+            metadata_path = workspace.with_suffix(".json")
+            if (snapshot(metadata_path) != exported["metadata"]
+                    or workspace_snapshot(workspace) != exported["files"]):
+                continue
+            metadata = read_record(metadata_path)
+            metadata["resolved"] = exported["files"]
+            write_record(metadata_path, metadata)
+        cleanup(home)
+    except (Divergence, OSError, ValueError, KeyError, TypeError) as error:
+        # Housekeeping must not turn an otherwise successful activation into failure.
+        print(f"Reconciliation cleanup skipped: {error}", file=sys.stderr)
+
+
 def approved_result(home, name, state, base, desired):
     receipt = snapshot(approval_path(home, name))
     if receipt is None:
@@ -219,7 +335,7 @@ def resolve(home, old, new, filename, replace=True):
     approve_candidate(home, name, state, base, live, desired, result)
 
 
-def approve_candidate(home, name, state, base, live, desired, result):
+def approve_candidate(home, name, state, base, live, desired, result, workspace=None):
     path = target(home, name)
     receipt_path = approval_path(home, name)
     receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -236,6 +352,12 @@ def approve_candidate(home, name, state, base, live, desired, result):
         os.fsync(stream.fileno())
     approval = {"policy": 2, "name": name, "before": state, "base": digest(base),
                 "desired": digest(desired), "result": encode(result), "backup": backup}
+    if workspace is not None:
+        approval["workspace"] = workspace
+    relative_backup = os.path.relpath(backup, home)
+    write_record(target(home, STATE + "backups/" + digest(os.fsencode(relative_backup)) + ".json"),
+                 {"name": name, "backup": relative_backup, "created": time.time(),
+                  "snapshot": snapshot(Path(backup))})
     fd, temporary = tempfile.mkstemp(prefix=".approval-", dir=receipt_path.parent)
     try:
         with os.fdopen(fd, "w") as stream:
@@ -312,7 +434,9 @@ def accept_conflict(home, old, new, directory, confirm=None):
             or snapshot(workspace.with_suffix(".json")) != metadata_state
             or resolution_inputs(home, old, new, name) != inputs):
         raise Divergence("Inputs or candidate changed during review. Review again.")
-    approve_candidate(home, name, state, base, live, desired, candidate)
+    approve_candidate(home, name, state, base, live, desired, candidate,
+                      workspace={"name": workspace.name, "metadata": metadata_state,
+                                 "files": workspace_snapshot(workspace)})
     return True
 
 
@@ -511,6 +635,8 @@ if __name__ == "__main__":
             print(json.dumps(check(*sys.argv[2:])))
         elif sys.argv[1] == "apply":
             apply(sys.argv[2], json.load(sys.stdin))
+        elif sys.argv[1] == "finish":
+            finish_activation(sys.argv[2], json.load(sys.stdin))
         elif sys.argv[1] == "list":
             for name in manifest(sys.argv[2]):
                 sys.stdout.buffer.write(os.fsencode(name) + b"\0")
@@ -520,8 +646,10 @@ if __name__ == "__main__":
         elif sys.argv[1] == "resolve":
             parser = argparse.ArgumentParser(description="Check reconciliation, or back up and approve one file for activation.")
             parser.add_argument("--generation", required=True)
+            parser.add_argument("--dry-run", action="store_true", help="preview --cleanup removals")
             parser.add_argument("--verbose", action="store_true", help="with --check, list all local changes")
             choice = parser.add_mutually_exclusive_group(required=True)
+            choice.add_argument("--cleanup", action="store_true", help="prune old backups and resolved workspaces")
             choice.add_argument("--replace", action="store_true")
             choice.add_argument("--check", action="store_true", help="read-only check of all reconciled files")
             choice.add_argument("--export", action="store_true", help="export private A/B/C and candidate files")
@@ -530,14 +658,18 @@ if __name__ == "__main__":
             args = parser.parse_args(sys.argv[2:])
             if args.verbose and not args.check:
                 parser.error("--verbose requires --check")
-            if args.check and args.file is not None:
-                parser.error("--check checks all files and does not accept a file argument")
-            if not args.check and args.file is None:
+            if args.dry_run and not args.cleanup:
+                parser.error("--dry-run requires --cleanup")
+            if (args.check or args.cleanup) and args.file is not None:
+                parser.error("--check and --cleanup do not accept a file argument")
+            if not (args.check or args.cleanup) and args.file is None:
                 parser.error("a file is required for resolution")
             home = os.environ["HOME"]
             state_home = Path(os.environ.get("XDG_STATE_HOME", str(Path(home) / ".local/state")))
             old = state_home / "home-manager/gcroots/current-home"
-            if args.check:
+            if args.cleanup:
+                cleanup(home, dry_run=args.dry_run)
+            elif args.check:
                 report_status(home, str(old.resolve()) if old.exists() else "", args.generation, verbose=args.verbose)
             elif args.export or args.accept:
                 operation = export_conflict if args.export else accept_conflict

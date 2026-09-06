@@ -244,3 +244,28 @@ The integration derivation is also registered as `files-reconciliation` in
 against temporary homes, including default symlinks, migration, hooks, rollback,
 foreign collisions, and pre-boundary conflict failure. It does not run a NixOS
 VM or alter the real user's profile or home files.
+
+### Backup retention and workspace cleanup
+
+Successful activation runs cleanup after all activation hooks and the generation
+update. For each managed file it retains the newest three recorded backups and
+all backups younger than 30 days. Backups referenced by any pending approval
+(including stale approvals) are always protected. Modified backups and legacy
+backups without cleanup records are left untouched. Backup records live under
+`~/.local/state/home-manager/reconciliation/backups`.
+
+An accepted workspace and its sibling JSON metadata are removed only after full
+activation succeeds and the approved contents are installed. Workspaces changed
+after approval, unresolved candidates, and stale exports are preserved; discard
+these manually when no longer needed. Cleanup does not follow symlinks or remove
+unrecorded backup files.
+
+Preview or run the same policy independently of activation:
+
+```sh
+/nix/store/…-home-manager-generation/reconcile --cleanup --dry-run
+/nix/store/…-home-manager-generation/reconcile --cleanup
+```
+
+Dry runs do not update cleanup state. Cleanup errors during automatic housekeeping
+are reported without failing an otherwise successful activation.

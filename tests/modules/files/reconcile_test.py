@@ -434,6 +434,122 @@ class Reconciliation(unittest.TestCase):
         with self.assertRaises(r.Divergence):
             r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
 
+    def test_cleanup_retention_pending_and_dry_run(self):
+        old, new, _ = self.candidate_workspace()
+        backups = []
+        for i in range(6):
+            r.resolve(self.home, old, new, "config")
+            receipt = r.read_record(r.approval_path(self.home, "config"))
+            backups.append(Path(receipt["backup"]))
+            records = self.home / r.STATE / "backups"
+            record_path = records / (r.digest(os.fsencode(os.path.relpath(backups[-1], self.home))) + ".json")
+            record = r.read_record(record_path)
+            record["created"] = i
+            r.write_record(record_path, record)
+            if i == 0:
+                pending = receipt
+        # Even an old or stale pending approval protects its backup.
+        r.write_record(r.approval_path(self.home, "config"), pending)
+        orphan = self.home / "config.hm-backup-legacy"
+        orphan.write_text("untracked")
+        before = {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file()}
+        output = self.notice_output(lambda: r.cleanup(self.home, dry_run=True, now=40 * 86400))
+        self.assertIn("Would remove backup:", output)
+        self.assertEqual(before, {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file()})
+        r.cleanup(self.home, now=40 * 86400)
+        self.assertEqual([p.exists() for p in backups], [True, False, False, True, True, True])
+        self.assertTrue(orphan.exists())
+
+    def test_cleanup_keeps_recent_and_modified_backups(self):
+        old, new, _ = self.candidate_workspace()
+        backups = []
+        for _ in range(5):
+            r.resolve(self.home, old, new, "config")
+            backups.append(Path(r.read_record(r.approval_path(self.home, "config"))["backup"]))
+        r.cleanup(self.home)
+        self.assertTrue(all(p.exists() for p in backups))
+        backups[0].write_text("edited backup")
+        r.cleanup(self.home, now=r.time.time() + 40 * 86400)
+        self.assertTrue(backups[0].exists())
+        self.assertFalse(backups[1].exists())
+
+    def test_workspace_cleanup_only_after_success(self):
+        old, new, workspace = self.candidate_workspace()
+        unresolved = r.export_conflict(self.home, old, new, "config")
+        r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+        r.cleanup(self.home)
+        self.assertTrue(workspace.exists())
+        plan = r.check(self.home, old, new)
+        r.apply(self.home, plan)
+        # A later failing activation hook never calls finish_activation.
+        r.cleanup(self.home)
+        self.assertTrue(workspace.exists())
+        r.finish_activation(self.home, plan)
+        self.assertFalse(workspace.exists())
+        self.assertFalse(workspace.with_suffix(".json").exists())
+        self.assertTrue(unresolved.exists())
+
+    def test_workspace_edits_after_approval_are_preserved(self):
+        old, new, workspace = self.candidate_workspace()
+        r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+        plan = r.check(self.home, old, new)
+        r.apply(self.home, plan)
+        (workspace / "candidate").write_text("more unfinished work")
+        r.finish_activation(self.home, plan)
+        self.assertTrue(workspace.exists())
+
+    def test_cleanup_rejects_backup_symlink(self):
+        old, new, _ = self.candidate_workspace()
+        for _ in range(4):
+            r.resolve(self.home, old, new, "config")
+        records = sorted((self.home / r.STATE / "backups").glob("*.json"),
+                         key=lambda p: r.read_record(p)["created"])
+        backup = self.home / r.read_record(records[0])["backup"]
+        backup.unlink()
+        backup.symlink_to(self.live)
+        r.cleanup(self.home, now=r.time.time() + 40 * 86400)
+        self.assertTrue(backup.is_symlink())
+        self.assertTrue(self.live.exists())
+
+    def test_resolved_workspace_dry_run_and_unknown_files(self):
+        _, _, workspace = self.candidate_workspace()
+        metadata_path = workspace.with_suffix(".json")
+        metadata = r.read_record(metadata_path)
+        metadata["resolved"] = r.workspace_snapshot(workspace)
+        r.write_record(metadata_path, metadata)
+        output = self.notice_output(lambda: r.cleanup(self.home, dry_run=True))
+        self.assertIn("Would remove resolved workspace:", output)
+        self.assertTrue(workspace.exists())
+        extra = workspace / "notes"
+        extra.write_text("unfinished notes")
+        r.cleanup(self.home)
+        self.assertTrue(extra.exists())
+        extra.unlink()
+        r.cleanup(self.home)
+        self.assertFalse(workspace.exists())
+        self.assertFalse(metadata_path.exists())
+
+    def test_cleanup_failure_does_not_fail_activation(self):
+        old, new, workspace = self.candidate_workspace()
+        r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+        plan = r.check(self.home, old, new)
+        r.apply(self.home, plan)
+        (workspace / "candidate").unlink()
+        (workspace / "candidate").symlink_to(self.live)
+        output = self.notice_output(lambda: r.finish_activation(self.home, plan))
+        self.assertIn("cleanup skipped", output)
+        self.assertTrue(workspace.exists())
+
+    def test_cleanup_cli(self):
+        old, new, _ = self.candidate_workspace()
+        command = [sys.executable, r.__file__, "resolve", "--generation", new]
+        env = dict(os.environ, HOME=str(self.home))
+        result = subprocess.run(command + ["--cleanup", "--dry-run"], env=env, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for args in (["--replace", "config", "--dry-run"], ["--cleanup", "config"]):
+            result = subprocess.run(command + args, env=env, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+
     def test_candidate_declined_without_writes(self):
         old, new, workspace = self.candidate_workspace()
         before = r.snapshot(self.live)

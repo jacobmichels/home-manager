@@ -82,6 +82,9 @@ let
       run touch "$HOME/write-boundary"
       ${cfg.home.activation.linkGeneration.data}
       ${cfg.home.activation.onFilesChange.data}
+      if [[ ! -v DRY_RUN ]]; then
+        ${pkgs.python3}/bin/python3 ${../../../modules/files/reconcile.py} finish "$HOME" <<< "$reconciliationPlan"
+      fi
     '';
 in
 assert global.home.file.config.reconciliation.enable;
