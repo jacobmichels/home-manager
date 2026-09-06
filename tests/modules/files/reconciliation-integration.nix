@@ -84,11 +84,16 @@ pkgs.runCommand "reconciliation-integration"
     test -e "$HOME/hook-ran"
     rm "$HOME/hook-ran"
     sed -i 's/theme=light/theme=dark/' "$HOME/config"
-    ${activate second} ${generation second}
+    ${activate second} ${generation second} 2> "$TMPDIR/notices"
+    grep -q 'LOCAL CHANGES:.*config' "$TMPDIR/notices"
+    # Report persistent local edits again on the next activation.
+    ${activate second} ${generation second} 2> "$TMPDIR/notices"
+    grep -q 'LOCAL CHANGES:.*config' "$TMPDIR/notices"
     test ! -e "$HOME/hook-ran"
     grep -q 'theme=dark' "$HOME/config"
     # Roll back the independent font edit, preserving the application's theme.
-    ${activate first} ${generation second}
+    ${activate first} ${generation second} 2> "$TMPDIR/notices"
+    grep -q 'MERGE READY:.*config' "$TMPDIR/notices"
     grep -q 'theme=dark' "$HOME/config"
     grep -q 'font=14' "$HOME/config"
     cp "$HOME/config" "$TMPDIR/before"

@@ -145,7 +145,18 @@ def check(home, old, new):
                 mode = state["mode"]
                 if not mode & stat.S_IWUSR:
                     raise Divergence("live file is not owner-writable")
-                result = merge(base_path.read_bytes(), base64.b64decode(state["data"]), desired)
+                base = base_path.read_bytes()
+                live = base64.b64decode(state["data"])
+                result = merge(base, live, desired)
+                if live != desired:
+                    if result == live:
+                        print(f"LOCAL CHANGES: {path}\n"
+                              "Preserving live edits that differ from the declarative configuration.",
+                              file=sys.stderr)
+                    elif live != base:
+                        print(f"MERGE READY: {path}\n"
+                              "Live edits and declarative changes merge cleanly; result will be installed during activation.",
+                              file=sys.stderr)
             plan.append({"name": name, "before": state, "result": encode(result), "mode": mode})
         except (Divergence, OSError) as error:
             raise Divergence(f"DIVERGENCE: {path}\n"
