@@ -11,6 +11,19 @@ let
 
   homeDirectory = config.home.homeDirectory;
 
+  reconciled = lib.filterAttrs (_: f: f.reconciliation.enable) cfg;
+  reconciliationManifest = pkgs.writeText "home-manager-reconciliation.json" (
+    builtins.toJSON (map (f: f.target) (lib.attrValues reconciled))
+  );
+  reconcile = "${pkgs.python3}/bin/python3 ${./files/reconcile.py}";
+  skipReconciled = lib.optionalString (reconciled != { }) ''
+    case "$relativePath" in
+      ${
+        lib.concatMapStringsSep "|" (f: lib.escapeShellArg f.target) (lib.attrValues reconciled)
+      }) continue ;;
+    esac
+  '';
+
   fileType =
     (import lib/file-type.nix {
       inherit homeDirectory lib pkgs;
@@ -71,7 +84,21 @@ in
                 }'';
         }
       )
-    ];
+    ]
+    ++ lib.mapAttrsToList (name: f: {
+      assertion = !f.recursive && !f.force;
+      message = "Reconciled file ${name} cannot use recursive or force.";
+    }) reconciled;
+
+    home.extraBuilderCommands = ''
+      ln -s ${reconciliationManifest} "$out/reconciliation.json"
+    '';
+
+    home.activation.checkReconciledFiles =
+      lib.hm.dag.entryBefore [ "writeBoundary" "checkFilesChanged" ]
+        ''
+          reconciliationPlan="$(${reconcile} check "$HOME" "''${oldGenPath:-}" "$newGenPath")" || exit 1
+        '';
 
     #  Using this function it is possible to make `home.file` create a
     #  symlink to a path outside the Nix store. For example, a Home Manager
@@ -104,6 +131,7 @@ in
         check = pkgs.replaceVars ./files/check-link-targets.sh {
           inherit (config.lib.bash) initHomeManagerLib;
           inherit forcedPaths storeDir;
+          inherit skipReconciled;
         };
       in
       ''
@@ -145,6 +173,7 @@ in
           shift
           for sourcePath in "$@" ; do
             relativePath="''${sourcePath#$newGenFiles/}"
+            ${skipReconciled}
             targetPath="$HOME/$relativePath"
             if [[ -e "$targetPath" && ! -L "$targetPath" && -n "$HOME_MANAGER_BACKUP_EXT" ]] ; then
               # The target exists, back it up
@@ -175,8 +204,15 @@ in
           homeFilePattern="$(readlink -e ${lib.escapeShellArg builtins.storeDir})/*-home-manager-files/*"
 
           newGenFiles="$1"
-          shift 1
+          declare -A oldReconciled=()
+          while IFS= read -r -d "" name; do
+            oldReconciled["$name"]=1
+          done < <(${reconcile} list "$2")
+          shift 2
           for relativePath in "$@" ; do
+            if [[ -v oldReconciled["$relativePath"] ]]; then
+              continue
+            fi
             targetPath="$HOME/$relativePath"
             if [[ -e "$newGenFiles/$relativePath" ]] ; then
               verboseEcho "Checking $targetPath: exists"
@@ -229,9 +265,12 @@ in
           # generation. The find command below will print the
           # relative path of the entry.
           find "$oldGenFiles" '(' -type f -or -type l ')' -printf '%P\0' \
-            | xargs -0 bash ${cleanup} "$newGenFiles"
+            | xargs -0 bash ${cleanup} "$newGenFiles" "$oldGenPath"
         }
 
+        if [[ ! -v DRY_RUN ]]; then
+          ${reconcile} apply "$HOME" <<< "$reconciliationPlan" || exit 1
+        fi
         cleanOldGen
         linkNewGen
       ''
@@ -257,11 +296,18 @@ in
           sourceArg = lib.escapeShellArg (sourceStorePath v);
           targetArg = lib.escapeShellArg v.target;
         in
-        ''
-          _cmp ${sourceArg} ${homeDirArg}/${targetArg} \
-            && changedFiles[${targetArg}]=0 \
-            || changedFiles[${targetArg}]=1
-        ''
+        if v.reconciliation.enable then
+          ''
+            ${reconcile} changed ${targetArg} <<< "$reconciliationPlan" \
+              && changedFiles[${targetArg}]=1 \
+              || changedFiles[${targetArg}]=0
+          ''
+        else
+          ''
+            _cmp ${sourceArg} ${homeDirArg}/${targetArg} \
+              && changedFiles[${targetArg}]=0 \
+              || changedFiles[${targetArg}]=1
+          ''
       ) (lib.filter (v: v.onChange != "") (lib.attrValues cfg))
       + ''
         unset -f _cmp
@@ -301,6 +347,12 @@ in
               local executable="$3"
               local recursive="$4"
               local ignorelinks="$5"
+              local reconciled="$6"
+
+              if [[ $reconciled && ! -f $source ]]; then
+                echo "Reconciliation requires a regular file: $relTarget" >&2
+                exit 1
+              fi
 
               # If the target already exists then we have a collision. Note, this
               # should not happen due to the assertion found in the 'files' module.
@@ -340,7 +392,7 @@ in
                 # i.e., if the executable bit of the source is the same we
                 # expect for the target. Otherwise, we copy the file and
                 # set the executable bit to the expected value.
-                if [[ $executable == inherit || $isExecutable == $executable ]]; then
+                if [[ ! $reconciled && ( $executable == inherit || $isExecutable == $executable ) ]]; then
                   ln -s "$source" "$target"
                 else
                   cp "$source" "$target"
@@ -366,6 +418,7 @@ in
                   (if v.executable == null then "inherit" else toString v.executable)
                   (toString v.recursive)
                   (toString v.ignorelinks)
+                  (toString v.reconciliation.enable)
                 ]
               }
             '') cfg
