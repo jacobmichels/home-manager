@@ -434,9 +434,12 @@ def accept_conflict(home, old, new, directory, confirm=None):
             or snapshot(workspace.with_suffix(".json")) != metadata_state
             or resolution_inputs(home, old, new, name) != inputs):
         raise Divergence("Inputs or candidate changed during review. Review again.")
+    files = workspace_snapshot(workspace)
+    if files.get("candidate") != candidate_state:
+        raise Divergence("Candidate changed while recording approval. Review again.")
     approve_candidate(home, name, state, base, live, desired, candidate,
                       workspace={"name": workspace.name, "metadata": metadata_state,
-                                 "files": workspace_snapshot(workspace)})
+                                 "files": files})
     return True
 
 

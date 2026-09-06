@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "reconcile", os.environ.get("RECONCILE_MODULE") or
@@ -488,6 +489,19 @@ class Reconciliation(unittest.TestCase):
         self.assertFalse(workspace.exists())
         self.assertFalse(workspace.with_suffix(".json").exists())
         self.assertTrue(unresolved.exists())
+
+    def test_candidate_change_while_recording_is_not_approved(self):
+        old, new, workspace = self.candidate_workspace()
+        original = r.workspace_snapshot
+
+        def changed(directory):
+            (directory / "candidate").write_text("unreviewed edit")
+            return original(directory)
+
+        with mock.patch.object(r, "workspace_snapshot", side_effect=changed):
+            with self.assertRaises(r.Divergence):
+                r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+        self.assertFalse(r.approval_path(self.home, "config").exists())
 
     def test_workspace_edits_after_approval_are_preserved(self):
         old, new, workspace = self.candidate_workspace()
