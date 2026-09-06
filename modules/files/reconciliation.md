@@ -61,6 +61,9 @@ Identical edits coalesce. Adjacent replacements are accepted, so changing the
 theme on one line and font size on the next merges. Inserting at the boundary
 of another edit is rejected conservatively. This is a text merge, not a proof
 of semantic compatibility; it does not understand settings or file formats.
+An agreed single-line replacement also coalesces when one side adds surrounding
+lines in the same diff hunk, provided the agreed line occurs exactly once and
+the original line is absent. Ambiguous matches still fail.
 
 ## Edge cases
 

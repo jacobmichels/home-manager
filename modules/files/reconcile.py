@@ -93,15 +93,27 @@ def merge(base, live, desired):
                 if op != "equal"]
 
     left, right = edits(live), edits(desired)
+    subsumed = []
     for i, j, replacement in left:
         for k, l, other in right:
             if (i, j, replacement) == (k, l, other):
                 continue
+            # Diff groups insertions adjacent to a replacement into one hunk.
+            # Recognize an agreed single-line replacement inside such a hunk,
+            # retaining the surrounding additions. Require a unique new line
+            # and absence of the original line; otherwise alignment is ambiguous.
+            if i == k and j == l and j == i + 1:
+                smaller, larger = sorted((replacement, other), key=len)
+                if (len(smaller) == 1 and len(larger) > 1
+                        and larger.count(smaller[0]) == 1 and a[i] not in larger):
+                    subsumed.append((i, j, smaller))
+                    continue
             # Adjacent replacements are independent. Insertions at the edge of
             # another edit are ambiguous and deliberately rejected.
             if max(i, k) < min(j, l) or (i == j and k <= i <= l) or (k == l and i <= k <= j):
                 raise Divergence("overlapping live and declarative edits")
     combined = left + [edit for edit in right if edit not in left]
+    combined = [edit for edit in combined if edit not in subsumed]
     for i, j, replacement in sorted(combined, reverse=True):
         a[i:j] = replacement
     return b"".join(a)

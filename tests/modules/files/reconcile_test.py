@@ -158,6 +158,33 @@ class Reconciliation(unittest.TestCase):
         self.assertEqual(r.merge(b"a\nb\nc\n", b"A\nb\nc\n",
                                  b"A\nb\nC\n"), b"A\nb\nC\n")
 
+    def test_shared_replacement_with_surrounding_live_additions(self):
+        old = self.generation("old", b"theme=light\nfont-size=14\n")
+        new = self.generation("new", b"theme=light\nfont-size=20\n")
+        live = b"foo=bar\ntheme=light\nhello=world\nfont-size=20\nmeow=mix\n"
+        self.live.write_bytes(live)
+        before = r.snapshot(self.live)
+        self.activate(old, new)
+        self.assertEqual(r.snapshot(self.live), before)
+
+    def test_shared_replacement_with_declarative_additions(self):
+        self.assertEqual(r.merge(b"size=14\n", b"size=20\n",
+                                 b"before\nsize=20\nafter\n"),
+                         b"before\nsize=20\nafter\n")
+
+    def test_surrounding_additions_do_not_hide_conflicts(self):
+        for live in (b"before\nsize=12\nafter\n",
+                     b"size=20\nsize=20\n",
+                     b"size=14\nsize=20\n"):
+            with self.subTest(live=live), self.assertRaises(r.Divergence):
+                r.merge(b"size=14\n", live, b"size=20\n")
+
+    def test_shared_replacement_does_not_hide_another_conflict(self):
+        with self.assertRaises(r.Divergence):
+            r.merge(b"size=14\nseparator\ntheme=light\n",
+                    b"before\nsize=20\nafter\nseparator\ntheme=dark\n",
+                    b"size=20\nseparator\ntheme=catppuccin\n")
+
 
 if __name__ == "__main__":
     unittest.main()
