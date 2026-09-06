@@ -16,8 +16,12 @@ Git needed conflict resolution, Fish/automation/release files changed, modules
 were removed, commit subjects flag compatibility changes, or the update exceeds
 100 commits or 100 changed files. Failed validation produces a draft PR. These
 are explicit attention rules, not a guarantee that all behavioral changes are detected.
-The Pi merges only the exact tested commit and rejects a concurrent change to
-master. Manually merge reviewed updates with a merge commit to retain ancestry.
+The Pi rebases fork commits onto upstream without creating merge commits, then
+publishes the exact tested candidate with an explicit force-with-lease on master.
+A concurrent change to master rejects the update. Fork commit IDs change after
+each rebase; existing checkouts must account for rewritten history. For reviewed
+updates, publish the exact tested candidate with the same explicit lease rather
+than using GitHub’s merge-commit button. Upstream’s own history is preserved.
 
 For blocked conflicts, reply on **Upstream sync needs a decision** with
 `/upstream-sync <complete decision>`. Only Jacob's commands are accepted. The Pi
