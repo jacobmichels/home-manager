@@ -2,6 +2,8 @@
   homeDirectory,
   lib,
   pkgs,
+  reconciliationDefault ? false,
+  reconciliationExcludedTargets ? [ ],
 }:
 
 let
@@ -50,7 +52,7 @@ in
                 let
                   absPath = if isAbsolutePath p then p else "${basePath}/${p}";
                 in
-                removeHomePrefix absPath;
+                removePrefix "./" (removeHomePrefix absPath);
               defaultText = literalExpression "name";
               description = ''
                 Path to target file relative to ${basePathDesc}.
@@ -145,7 +147,8 @@ in
 
             reconciliation.enable = mkOption {
               type = types.bool;
-              default = false;
+              default = reconciliationDefault && !(builtins.elem config.target reconciliationExcludedTargets);
+              defaultText = literalExpression "config.home.fileReconciliation.enable";
               description = ''
                 Materialize this file as a writable regular file and reconcile
                 live edits with the previous and new generated contents. Conflicts
