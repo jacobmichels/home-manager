@@ -187,28 +187,6 @@ class Reconciliation(unittest.TestCase):
                     b"before\nsize=20\nafter\nseparator\ntheme=dark\n",
                     b"size=20\nseparator\ntheme=catppuccin\n")
 
-    def test_explicit_replace_and_merge_are_distinct(self):
-        base = b"size=14\nseparator\ntheme=light\n"
-        live = b"size=12\nseparator\ntheme=dark\n"
-        desired = b"size=20\nseparator\ntheme=light\n"
-        old = self.generation("old", base)
-        new = self.generation("new", desired)
-        for replace, expected in [(False, b"size=20\nseparator\ntheme=dark\n"),
-                                  (True, desired)]:
-            with self.subTest(replace=replace):
-                self.live.write_bytes(live)
-                r.resolve(self.home, old, new, "config", replace=replace)
-                self.assertEqual(self.live.read_bytes(), live)
-                receipt = json.loads(r.approval_path(self.home, "config").read_text())
-                self.assertEqual(Path(receipt["backup"]).read_bytes(), live)
-                self.activate(old, new)
-                self.assertEqual(self.live.read_bytes(), expected)
-                self.assertFalse(r.approval_path(self.home, "config").exists())
-                # Consumed approval cannot silently resolve a later edit.
-                self.live.write_bytes(live)
-                with self.assertRaises(r.Divergence):
-                    self.activate(old, new)
-
     def test_resolution_is_bound_to_exact_inputs(self):
         old = self.generation("old", b"size=14\n")
         new = self.generation("new", b"size=20\n")
@@ -233,48 +211,6 @@ class Reconciliation(unittest.TestCase):
         with self.assertRaises(r.Divergence):
             r.resolve(self.home, old, new, "config", replace=True)
 
-    def test_declared_preferred_merge_preserves_surrounding_additions(self):
-        old = self.generation("old", b"theme=light\nfont-size=15\n")
-        new = self.generation("new", b"theme=light\nfont-size=20\n")
-        live = b"foo=bar\ntheme=light\nhello=world\nfont-size=16\nmeow=mix\n"
-        self.live.write_bytes(live)
-        r.resolve(self.home, old, new, "config")
-        self.assertEqual(self.live.read_bytes(), live)
-        receipt = json.loads(r.approval_path(self.home, "config").read_text())
-        self.assertEqual(Path(receipt["backup"]).read_bytes(), live)
-        self.activate(old, new)
-        self.assertEqual(self.live.read_bytes(), live.replace(b"font-size=16", b"font-size=20"))
-
-    def test_declared_preferred_merge_refuses_ambiguous_alignment(self):
-        for base, live, desired in [
-            (b"size=15\n", b"size=16\nsize=17\n", b"size=20\n"),
-            (b"red\n", b"green\nextra\n", b"blue\n"),
-            (b'"red",\n', b'"green",\nextra\n', b'"blue",\n'),
-            (b"a\nb\n", b"A\nextra\nB\n", b"C\nD\n"),
-            (b"anchor\n", b"left\nanchor\n", b"right\nanchor\n"),
-        ]:
-            with self.subTest(live=live), self.assertRaises(r.Divergence):
-                r.merge(base, live, desired, prefer_declared=True)
-
-    def test_explicit_replace_still_works_when_merge_is_ambiguous(self):
-        old = self.generation("old", b"red\n")
-        new = self.generation("new", b"blue\n")
-        self.live.write_bytes(b"green\nextra\n")
-        with self.assertRaises(r.Divergence):
-            r.resolve(self.home, old, new, "config")
-        self.assertFalse(r.approval_path(self.home, "config").exists())
-        self.assertEqual(list(self.home.glob("config.hm-backup-*")), [])
-        r.resolve(self.home, old, new, "config", replace=True)
-        self.activate(old, new)
-        self.assertEqual(self.live.read_bytes(), b"blue\n")
-
-
-    def test_adjacent_declared_replacements_align_individually(self):
-        self.assertEqual(r.merge(b"theme=light\nsize=15\n",
-                                 b"theme=dark\nsize=16\n",
-                                 b"theme=catppuccin\nsize=20\n", prefer_declared=True),
-                         b"theme=catppuccin\nsize=20\n")
-
     def test_live_additions_beside_unchanged_line_update_normally(self):
         base = b"theme=light\nfont-size=20\n"
         desired = b"theme=light\nfont-size=30\n"
@@ -296,9 +232,8 @@ class Reconciliation(unittest.TestCase):
         base = b'#!/bin/sh\necho old\n'
         live = b'#!/bin/sh\n# before\necho old\naudit\n'
         desired = b'#!/bin/sh\necho new\n'
-        for prefer_declared in (False, True):
-            self.assertEqual(r.merge(base, live, desired, prefer_declared=prefer_declared),
-                             b'#!/bin/sh\n# before\necho new\naudit\n')
+        self.assertEqual(r.merge(base, live, desired),
+                         b'#!/bin/sh\n# before\necho new\naudit\n')
 
     def test_boundary_insertion_exception_does_not_hide_ambiguity(self):
         for base, live, desired in (
@@ -308,11 +243,9 @@ class Reconciliation(unittest.TestCase):
             (b"a\na\n", b"extra\na\na\n", b"A\na\n"),  # repeated anchor
             (b"a\nb\n", b"extra\na\nb\na\n", b"A\nb\n"),  # duplicated live anchor
         ):
-            for prefer_declared in (False, True):
-                with self.subTest(base=base, live=live, desired=desired,
-                                  prefer_declared=prefer_declared):
-                    with self.assertRaises(r.Divergence):
-                        r.merge(base, live, desired, prefer_declared=prefer_declared)
+            with self.subTest(base=base, live=live, desired=desired):
+                with self.assertRaises(r.Divergence):
+                    r.merge(base, live, desired)
 
     def test_shell_independent_function_edits(self):
         base = (b'#!/bin/sh\nprepare() {\n  echo "preparing"\n}\n\n'
@@ -341,7 +274,9 @@ class Reconciliation(unittest.TestCase):
         with self.assertRaises(r.Divergence):
             self.activate(old, new)
         self.assertEqual(r.snapshot(self.live), before)
-        r.resolve(self.home, old, new, "config")
+        workspace = r.export_conflict(self.home, old, new, "config")
+        (workspace / "candidate").write_bytes(live.replace(b'"local"', b'"production"'))
+        r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
         self.assertEqual(r.snapshot(self.live), before)
         receipt = json.loads(r.approval_path(self.home, "config").read_text())
         self.assertEqual(Path(receipt["backup"]).read_bytes(), live)
@@ -367,7 +302,7 @@ class Reconciliation(unittest.TestCase):
 
     def test_shell_ambiguous_resolution_leaves_everything_untouched(self):
         # These are text fixtures, never executed. Both ordinary activation and
-        # declared-preferred resolution must refuse ambiguous overlapping hunks.
+        # the removed declared-preferred resolver must refuse without writing.
         cases = {
             "shared value prefix does not identify local assignment": (
                 b'MODE="default"\n', b'# local comment\nMODE="local"\naudit\n',
@@ -400,7 +335,7 @@ class Reconciliation(unittest.TestCase):
                     self.activate(old, new)
                 self.assertEqual(r.snapshot(self.live), before)
                 with self.assertRaises(r.Divergence):
-                    r.resolve(self.home, old, new, "config")
+                    r.resolve(self.home, old, new, "config", replace=False)
                 self.assertEqual(r.snapshot(self.live), before)
                 self.assertFalse(r.approval_path(self.home, "config").exists())
                 self.assertEqual(list(self.home.glob("config.hm-backup-*")), [])
@@ -498,6 +433,19 @@ class Reconciliation(unittest.TestCase):
         self.assertEqual(self.live.read_bytes(), b"size=24\n")
         self.activate(old, new)
         self.assertEqual(self.live.read_bytes(), b"size=30\n# retained\n")
+
+    def test_removed_merge_declared_cli_rejects_without_writes(self):
+        old, new, workspace = self.candidate_workspace()
+        before = r.snapshot(self.live)
+        result = subprocess.run(
+            [sys.executable, r.__file__, "resolve", "--generation", new,
+             "--merge-declared", "config"],
+            env=dict(os.environ, HOME=str(self.home)), capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(r.snapshot(self.live), before)
+        self.assertFalse(r.approval_path(self.home, "config").exists())
+        self.assertEqual(list(self.home.glob("config.hm-backup-*")), [])
+        self.assertNotIn("--merge-declared", r.resolution_guidance(old, new, "config"))
 
     def test_old_merge_policy_approval_is_not_accepted(self):
         old = self.generation("old", b"size=15\n")

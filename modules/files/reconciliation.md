@@ -113,18 +113,13 @@ prints two exact commands bound to the desired generation:
 
 ```sh
 /nix/store/…-home-manager-generation/reconcile --replace ~/.config/foo/config
-/nix/store/…-home-manager-generation/reconcile --merge-declared ~/.config/foo/config
+/nix/store/…-home-manager-generation/reconcile --export ~/.config/foo/config
 ```
 
-Choose one, then rerun normal activation. `--replace` installs the entire declared
-file, discarding local additions. `--merge-declared` preserves non-conflicting
-local edits and surrounding additions, replacing only identifiable conflicting
-lines. Unchanged textual prefixes and suffixes must uniquely align those lines;
-whitespace or punctuation alone is insufficient. Adjacent replacements are
-separated only when all lines align uniquely in both versions. Ambiguous blocks
-and ambiguous insertion boundaries are refused instead of discarded. This is not a
-setting-aware merge and can conservatively reject valid manual resolutions.
-Approvals produced by the older whole-block merge policy are no longer accepted.
+`--replace` approves the entire declared file, discarding local additions.
+`--export` starts the reviewed-candidate workflow below. Declared-preferred
+heuristic merging is no longer available. Existing approvals remain bound to
+exact inputs; no new heuristic resolutions can be created.
 
 ### Reviewed candidates (editor or agent)
 
@@ -187,7 +182,7 @@ an unbuilt declaration.
 
 An unchanged NixOS switch may not consume an approval. Explicitly restart the
 Home Manager service to apply it using its normal environment. Strata's
-`nix-reconcile --replace FILE` or `nix-reconcile --merge-declared FILE` combines
+`nix-reconcile --replace FILE` combines
 approval against the installed service's desired generation with that restart
 and displays its output. Ordinary `nix-swap` only runs the read-only checker
 when Home Manager was skipped; it does not force unrelated activation hooks.

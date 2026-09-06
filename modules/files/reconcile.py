@@ -38,10 +38,7 @@ def resolution_guidance(old, new, name):
         "    Accept Nix: for an existing reconciled regular file, choose ONE:",
         "      Replace the entire file with declared contents:",
         f"        {shlex.quote(str(Path(new) / 'reconcile'))} --replace {shlex.quote(name)}",
-        "      Preserve local additions; declared contents win identifiable conflicting lines:",
-        f"        {shlex.quote(str(Path(new) / 'reconcile'))} --merge-declared {shlex.quote(name)}",
-        "      Ambiguous alignment is refused; conflicting blocks are never discarded wholesale.",
-        "      These commands back up the live file and approve only this exact file state for the next activation.",
+        "      This command back up the live file and approve only this exact file state for the next activation.",
         "    Review a custom candidate without editing the live file:",
         f"        {shlex.quote(str(Path(new) / 'reconcile'))} --export {shlex.quote(name)}",
         "      Edit candidate in the printed workspace, then review and approve:",
@@ -118,22 +115,7 @@ def validate_text(*contents):
             raise Divergence("non-UTF-8 files are unsupported") from error
 
 
-def replacement_line(base, desired, live_lines):
-    """Find a unique line using unchanged textual edges, without parsing keys."""
-    prefix = os.path.commonprefix((base, desired))
-    suffix = os.path.commonprefix((base[len(prefix):][::-1], desired[len(prefix):][::-1]))[::-1]
-    # Whitespace and punctuation alone cannot identify the intended line.
-    if not any(chr(byte).isalnum() for byte in prefix + suffix):
-        raise Divergence("cannot safely identify the conflicting line among local additions")
-    candidates = [index for index, line in enumerate(live_lines)
-                  if line.startswith(prefix) and line.endswith(suffix)
-                  and len(line) >= len(prefix) + len(suffix)]
-    if len(candidates) != 1:
-        raise Divergence("cannot safely identify a unique conflicting line among local additions")
-    return candidates[0]
-
-
-def merge(base, live, desired, prefer_declared=False):
+def merge(base, live, desired):
     validate_text(base, live, desired)
     if live == base:
         return desired
@@ -148,26 +130,12 @@ def merge(base, live, desired, prefer_declared=False):
             if op == "equal":
                 continue
             replacement = lines[k:l]
-            # Split adjacent replacements only when stable textual edges
-            # uniquely align every line in both the old and new block.
-            if prefer_declared and op == "replace" and j - i == l - k and j - i > 1:
-                try:
-                    aligned = all(replacement_line(a[i + n], line, replacement) == n
-                                  and replacement_line(a[i + n], line, a[i:j]) == n
-                                  for n, line in enumerate(replacement))
-                except Divergence:
-                    aligned = False
-                if aligned:
-                    result.extend((i + n, i + n + 1, [line])
-                                  for n, line in enumerate(replacement) if line != a[i + n])
-                    continue
             result.append((i, j, replacement))
         return result
 
     live_lines = live.splitlines(keepends=True)
     left, right = edits(live), edits(desired)
     subsumed = []
-    refined = []
     for i, j, replacement in left:
         for k, l, other in right:
             if (i, j, replacement) == (k, l, other):
@@ -193,26 +161,9 @@ def merge(base, live, desired, prefer_declared=False):
             # Adjacent replacements are independent. Other insertions at the
             # edge of another edit remain ambiguous and deliberately rejected.
             if max(i, k) < min(j, l) or (i == j and k <= i <= l) or (k == l and i <= k <= j):
-                if prefer_declared:
-                    if i == k and j == l and j == i + 1:
-                        if len(replacement) <= 1:
-                            # There are no surrounding live additions to lose.
-                            subsumed.append((i, j, replacement))
-                            continue
-                        if len(other) == 1:
-                            index = replacement_line(a[i], other[0], replacement)
-                            resolved = replacement.copy()
-                            resolved[index] = other[0]
-                            refined.append((i, j, resolved))
-                            subsumed.extend([(i, j, replacement), (k, l, other)])
-                            continue
-                    raise Divergence("cannot safely separate conflicting edits from local additions; "
-                                     "resolve manually or explicitly replace the entire file")
-                else:
-                    raise Divergence("overlapping live and declarative edits")
+                raise Divergence("overlapping live and declarative edits")
     combined = left + [edit for edit in right if edit not in left]
     combined = [edit for edit in combined if edit not in subsumed]
-    combined.extend(refined)
     for i, j, replacement in sorted(combined, reverse=True):
         a[i:j] = replacement
     return b"".join(a)
@@ -259,10 +210,12 @@ def resolution_inputs(home, old, new, filename):
     return name, state, base, live, desired
 
 
-def resolve(home, old, new, filename, replace=False):
+def resolve(home, old, new, filename, replace=True):
     """Back up and approve one exact A/B/C state; activation installs the result."""
+    if not replace:
+        raise Divergence("Declared-preferred merging was removed; export and approve a reviewed candidate.")
     name, state, base, live, desired = resolution_inputs(home, old, new, filename)
-    result = desired if replace else merge(base, live, desired, prefer_declared=True)
+    result = desired
     approve_candidate(home, name, state, base, live, desired, result)
 
 
@@ -500,7 +453,6 @@ if __name__ == "__main__":
             parser.add_argument("--generation", required=True)
             choice = parser.add_mutually_exclusive_group(required=True)
             choice.add_argument("--replace", action="store_true")
-            choice.add_argument("--merge-declared", action="store_true")
             choice.add_argument("--check", action="store_true", help="read-only check of all reconciled files")
             choice.add_argument("--export", action="store_true", help="export private A/B/C and candidate files")
             choice.add_argument("--accept", action="store_true", help="review and approve an exported workspace")

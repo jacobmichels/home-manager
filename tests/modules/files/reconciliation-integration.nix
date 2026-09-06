@@ -115,7 +115,7 @@ pkgs.runCommand "reconciliation-integration"
     # Use the exact generation-local command printed in divergence guidance.
     mkdir -p "$HOME/.local/state/home-manager/gcroots"
     ln -s ${generation first} "$HOME/.local/state/home-manager/gcroots/current-home"
-    ${generation conflict}/reconcile --merge-declared "$HOME/config"
+    ${generation conflict}/reconcile --replace "$HOME/config"
     ${generation conflict}/reconcile --check > "$TMPDIR/status"
     grep -q 'approved but has not been applied' "$TMPDIR/status"
     cmp "$HOME/config" "$TMPDIR/before"
