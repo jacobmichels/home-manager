@@ -38,8 +38,9 @@ def resolution_guidance(old, new, name):
         "    Accept Nix: for an existing reconciled regular file, choose ONE:",
         "      Replace the entire file with declared contents:",
         f"        {shlex.quote(str(Path(new) / 'reconcile'))} --replace {shlex.quote(name)}",
-        "      Merge independent local edits; declared contents win conflicting diff hunks:",
+        "      Preserve local additions; declared contents win identifiable conflicting lines:",
         f"        {shlex.quote(str(Path(new) / 'reconcile'))} --merge-declared {shlex.quote(name)}",
+        "      Ambiguous alignment is refused; conflicting blocks are never discarded wholesale.",
         "      These commands back up the live file and approve only this exact file state for the next activation.",
         "    Combine both: manually resolve the content and make the live file and declaration agree.",
         "  Fix any file-type, ownership, or permission issue reported above first; matching contents does not bypass these checks.",
@@ -103,15 +104,34 @@ def snapshot(path):
             "mtime": before.st_mtime_ns, "ctime": before.st_ctime_ns}
 
 
-def merge(base, live, desired, prefer_declared=False):
+def validate_text(*contents):
     # Reject binary/non-UTF-8 inputs even when a byte comparison could succeed.
-    for data in (base, live, desired):
+    for data in contents:
         if b"\0" in data:
             raise Divergence("binary files are unsupported")
         try:
             data.decode("utf-8")
         except UnicodeDecodeError as error:
             raise Divergence("non-UTF-8 files are unsupported") from error
+
+
+def replacement_line(base, desired, live_lines):
+    """Find a unique line using unchanged textual edges, without parsing keys."""
+    prefix = os.path.commonprefix((base, desired))
+    suffix = os.path.commonprefix((base[len(prefix):][::-1], desired[len(prefix):][::-1]))[::-1]
+    # Whitespace and punctuation alone cannot identify the intended line.
+    if not any(chr(byte).isalnum() for byte in prefix + suffix):
+        raise Divergence("cannot safely identify the conflicting line among local additions")
+    candidates = [index for index, line in enumerate(live_lines)
+                  if line.startswith(prefix) and line.endswith(suffix)
+                  and len(line) >= len(prefix) + len(suffix)]
+    if len(candidates) != 1:
+        raise Divergence("cannot safely identify a unique conflicting line among local additions")
+    return candidates[0]
+
+
+def merge(base, live, desired, prefer_declared=False):
+    validate_text(base, live, desired)
     if live == base:
         return desired
     if desired == base or live == desired:
@@ -120,12 +140,30 @@ def merge(base, live, desired, prefer_declared=False):
 
     def edits(data):
         lines = data.splitlines(keepends=True)
-        return [(i, j, lines[k:l]) for op, i, j, k, l in
-                difflib.SequenceMatcher(None, a, lines, autojunk=False).get_opcodes()
-                if op != "equal"]
+        result = []
+        for op, i, j, k, l in difflib.SequenceMatcher(None, a, lines, autojunk=False).get_opcodes():
+            if op == "equal":
+                continue
+            replacement = lines[k:l]
+            # Split adjacent replacements only when stable textual edges
+            # uniquely align every line in both the old and new block.
+            if prefer_declared and op == "replace" and j - i == l - k and j - i > 1:
+                try:
+                    aligned = all(replacement_line(a[i + n], line, replacement) == n
+                                  and replacement_line(a[i + n], line, a[i:j]) == n
+                                  for n, line in enumerate(replacement))
+                except Divergence:
+                    aligned = False
+                if aligned:
+                    result.extend((i + n, i + n + 1, [line])
+                                  for n, line in enumerate(replacement) if line != a[i + n])
+                    continue
+            result.append((i, j, replacement))
+        return result
 
     left, right = edits(live), edits(desired)
     subsumed = []
+    refined = []
     for i, j, replacement in left:
         for k, l, other in right:
             if (i, j, replacement) == (k, l, other):
@@ -144,11 +182,25 @@ def merge(base, live, desired, prefer_declared=False):
             # another edit are ambiguous and deliberately rejected.
             if max(i, k) < min(j, l) or (i == j and k <= i <= l) or (k == l and i <= k <= j):
                 if prefer_declared:
-                    subsumed.append((i, j, replacement))
+                    if i == k and j == l and j == i + 1:
+                        if len(replacement) <= 1:
+                            # There are no surrounding live additions to lose.
+                            subsumed.append((i, j, replacement))
+                            continue
+                        if len(other) == 1:
+                            index = replacement_line(a[i], other[0], replacement)
+                            resolved = replacement.copy()
+                            resolved[index] = other[0]
+                            refined.append((i, j, resolved))
+                            subsumed.extend([(i, j, replacement), (k, l, other)])
+                            continue
+                    raise Divergence("cannot safely separate conflicting edits from local additions; "
+                                     "resolve manually or explicitly replace the entire file")
                 else:
                     raise Divergence("overlapping live and declarative edits")
     combined = left + [edit for edit in right if edit not in left]
     combined = [edit for edit in combined if edit not in subsumed]
+    combined.extend(refined)
     for i, j, replacement in sorted(combined, reverse=True):
         a[i:j] = replacement
     return b"".join(a)
@@ -170,7 +222,7 @@ def approved_result(home, name, state, base, desired):
     if "data" not in receipt:
         raise Divergence("resolution approval is not a regular file")
     approval = json.loads(base64.b64decode(receipt["data"]))
-    if (approval.get("name") == name and approval.get("before") == state
+    if (approval.get("policy") == 2 and approval.get("name") == name and approval.get("before") == state
             and approval.get("base") == digest(base)
             and approval.get("desired") == digest(desired)):
         return approval
@@ -192,8 +244,8 @@ def resolve(home, old, new, filename, replace=False):
         raise Divergence("Resolve executable-mode changes before accepting content changes.")
     base, desired = base_path.read_bytes(), desired_path.read_bytes()
     live = base64.b64decode(state["data"])
-    merged = merge(base, live, desired, prefer_declared=True)
-    result = desired if replace else merged
+    validate_text(base, live, desired)
+    result = desired if replace else merge(base, live, desired, prefer_declared=True)
     receipt_path = approval_path(home, name)
     receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Validate an existing receipt too; never follow an unexpected symlink.
@@ -207,7 +259,7 @@ def resolve(home, old, new, filename, replace=False):
         stream.write(live)
         stream.flush()
         os.fsync(stream.fileno())
-    approval = {"name": name, "before": state, "base": digest(base),
+    approval = {"policy": 2, "name": name, "before": state, "base": digest(base),
                 "desired": digest(desired), "result": encode(result), "backup": backup}
     fd, temporary = tempfile.mkstemp(prefix=".approval-", dir=receipt_path.parent)
     try:

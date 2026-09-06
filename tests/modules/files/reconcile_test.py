@@ -231,6 +231,60 @@ class Reconciliation(unittest.TestCase):
         with self.assertRaises(r.Divergence):
             r.resolve(self.home, old, new, "config", replace=True)
 
+    def test_declared_preferred_merge_preserves_surrounding_additions(self):
+        old = self.generation("old", b"theme=light\nfont-size=15\n")
+        new = self.generation("new", b"theme=light\nfont-size=20\n")
+        live = b"foo=bar\ntheme=light\nhello=world\nfont-size=16\nmeow=mix\n"
+        self.live.write_bytes(live)
+        r.resolve(self.home, old, new, "config")
+        self.assertEqual(self.live.read_bytes(), live)
+        receipt = json.loads(r.approval_path(self.home, "config").read_text())
+        self.assertEqual(Path(receipt["backup"]).read_bytes(), live)
+        self.activate(old, new)
+        self.assertEqual(self.live.read_bytes(), live.replace(b"font-size=16", b"font-size=20"))
+
+    def test_declared_preferred_merge_refuses_ambiguous_alignment(self):
+        for base, live, desired in [
+            (b"size=15\n", b"size=16\nsize=17\n", b"size=20\n"),
+            (b"red\n", b"green\nextra\n", b"blue\n"),
+            (b'"red",\n', b'"green",\nextra\n', b'"blue",\n'),
+            (b"a\nb\n", b"A\nextra\nB\n", b"C\nD\n"),
+            (b"anchor\n", b"left\nanchor\n", b"right\nanchor\n"),
+        ]:
+            with self.subTest(live=live), self.assertRaises(r.Divergence):
+                r.merge(base, live, desired, prefer_declared=True)
+
+    def test_explicit_replace_still_works_when_merge_is_ambiguous(self):
+        old = self.generation("old", b"red\n")
+        new = self.generation("new", b"blue\n")
+        self.live.write_bytes(b"green\nextra\n")
+        with self.assertRaises(r.Divergence):
+            r.resolve(self.home, old, new, "config")
+        self.assertFalse(r.approval_path(self.home, "config").exists())
+        self.assertEqual(list(self.home.glob("config.hm-backup-*")), [])
+        r.resolve(self.home, old, new, "config", replace=True)
+        self.activate(old, new)
+        self.assertEqual(self.live.read_bytes(), b"blue\n")
+
+
+    def test_adjacent_declared_replacements_align_individually(self):
+        self.assertEqual(r.merge(b"theme=light\nsize=15\n",
+                                 b"theme=dark\nsize=16\n",
+                                 b"theme=catppuccin\nsize=20\n", prefer_declared=True),
+                         b"theme=catppuccin\nsize=20\n")
+
+    def test_old_merge_policy_approval_is_not_accepted(self):
+        old = self.generation("old", b"size=15\n")
+        new = self.generation("new", b"size=20\n")
+        self.live.write_bytes(b"size=16\n")
+        r.resolve(self.home, old, new, "config")
+        receipt_path = r.approval_path(self.home, "config")
+        receipt = json.loads(receipt_path.read_text())
+        receipt.pop("policy")
+        receipt_path.write_text(json.dumps(receipt))
+        with self.assertRaises(r.Divergence):
+            self.activate(old, new)
+
 
 if __name__ == "__main__":
     unittest.main()

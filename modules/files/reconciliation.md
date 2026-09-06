@@ -115,8 +115,13 @@ prints two exact commands bound to the desired generation:
 
 Choose one, then rerun normal activation. `--replace` installs the entire declared
 file, discarding local additions. `--merge-declared` preserves non-conflicting
-local edits and uses the declared version for conflicting diff hunks. Nearby
-lines can belong to the same hunk; this is not a setting-aware merge.
+local edits and surrounding additions, replacing only identifiable conflicting
+lines. Unchanged textual prefixes and suffixes must uniquely align those lines;
+whitespace or punctuation alone is insufficient. Adjacent replacements are
+separated only when all lines align uniquely in both versions. Ambiguous blocks
+and insertion boundaries are refused instead of discarded. This is not a
+setting-aware merge and can conservatively reject valid manual resolutions.
+Approvals produced by the older whole-block merge policy are no longer accepted.
 
 Both commands create a unique, owner-only backup next to the live file and leave
 its contents untouched until activation. They write an approval under
