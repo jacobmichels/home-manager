@@ -52,6 +52,7 @@ class Reconciliation(unittest.TestCase):
         again = self.notice_output(lambda: r.report_status(self.home, old, old))
         self.assertNotIn("LOCAL CHANGES:", again)
         self.assertIn("1 file(s) have previously reported", again)
+        self.assertIn(f"Show files: {old}/reconcile --check --verbose", again)
         self.assertEqual(r.snapshot(self.live), before)
         verbose = self.notice_output(lambda: r.report_status(self.home, old, old, verbose=True))
         self.assertIn("LOCAL CHANGES:", verbose)

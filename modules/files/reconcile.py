@@ -370,7 +370,8 @@ def check(home, old, new):
                               "Live edits and declarative changes merge cleanly; result will be installed during activation.",
                               file=sys.stderr)
             plan.append({"name": name, "before": state, "result": encode(result), "mode": mode,
-                         "approval": approval, "local_notice": local_notice})
+                         "approval": approval, "local_notice": local_notice,
+                         "status_command": shlex.quote(str(Path(new) / "reconcile")) + " --check --verbose"})
         except (Divergence, OSError, ValueError) as error:
             raise Divergence(f"DIVERGENCE: {path}\n"
                              f"File was not modified. {error}"
@@ -420,6 +421,7 @@ def report_local_changes(home, plan, verbose=False):
                 os.unlink(temporary)
     if known:
         print(f"Reconciliation: {known} file(s) have previously reported local changes.", file=sys.stderr)
+        print(f"Show files: {plan[0]['status_command']}", file=sys.stderr)
 
 
 def apply(home, plan):
