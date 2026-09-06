@@ -134,6 +134,22 @@ bypass ownership, file-type, encoding, or executable-mode restrictions, and do
 not adopt foreign files. No global `home-manager reconcile` subcommand is added
 by this prototype.
 
+The same generation-local command accepts `--check` with no file argument. It
+performs preflight reconciliation and reports local changes, pending updates,
+and pending approvals without installing files or consuming approvals. It runs
+no Home Manager activation hooks and does not advance the baseline. A clean
+check exits zero; divergence exits nonzero. This supports reporting on NixOS
+switches where the Home Manager service does not run because its generation is
+unchanged. Checks against the active generation describe that generation, not
+an unbuilt declaration.
+
+An unchanged NixOS switch may not consume an approval. Explicitly restart the
+Home Manager service to apply it using its normal environment. Strata's
+`nix-reconcile --replace FILE` or `nix-reconcile --merge-declared FILE` combines
+approval against the installed service's desired generation with that restart
+and displays its output. Ordinary `nix-swap` only runs the read-only checker
+when Home Manager was skipped; it does not force unrelated activation hooks.
+
 Applications must be quiescent during activation. Snapshots detect changes
 between planning and installation, with a final per-file check, but POSIX rename
 does not provide compare-and-swap against concurrent application writes. The

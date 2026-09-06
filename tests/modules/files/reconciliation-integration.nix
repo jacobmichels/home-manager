@@ -70,6 +70,9 @@ pkgs.runCommand "reconciliation-integration"
     python3 ${./reconcile_test.py}
     export HOME="$TMPDIR/home"
     mkdir "$HOME"
+    ${generation first}/reconcile --check
+    test ! -e "$HOME/config"
+    test ! -e "$HOME/.local"
     DRY_RUN=1 ${activate first} ""
     test ! -e "$HOME/config"
     test ! -e "$HOME/static"
@@ -113,6 +116,8 @@ pkgs.runCommand "reconciliation-integration"
     mkdir -p "$HOME/.local/state/home-manager/gcroots"
     ln -s ${generation first} "$HOME/.local/state/home-manager/gcroots/current-home"
     ${generation conflict}/reconcile --merge-declared "$HOME/config"
+    ${generation conflict}/reconcile --check > "$TMPDIR/status"
+    grep -q 'approved but has not been applied' "$TMPDIR/status"
     cmp "$HOME/config" "$TMPDIR/before"
     ${activate conflict} ${generation first}
     cmp "$HOME/config" ${conflict.home-files}/config

@@ -328,6 +328,22 @@ def consume_approval(home, entry):
                 path.unlink()
 
 
+def report_status(home, old, new):
+    """Inspect reconciliation without installing files or consuming approvals."""
+    plan = check(home, old, new)
+    pending = [entry for entry in plan if entry.get("approval")]
+    updates = [entry for entry in plan
+               if (entry["before"] or {}).get("data") != entry["result"]]
+    if pending:
+        print("Resolution is approved but has not been applied. Explicitly run Home Manager activation to apply it.")
+    elif updates:
+        print("Reconciliation has pending file updates; run Home Manager activation to install them.")
+    elif not any(entry["result"] != encode((Path(new) / "home-files" / entry["name"]).read_bytes())
+                 for entry in plan):
+        print("Reconciled files match the declaration.")
+    print("Read-only check complete; no files were installed and no approvals were consumed.")
+
+
 if __name__ == "__main__":
     try:
         if sys.argv[1] == "check":
@@ -341,18 +357,26 @@ if __name__ == "__main__":
             entry = next(e for e in json.load(sys.stdin) if e["name"] == sys.argv[2])
             sys.exit(0 if (entry["before"] or {}).get("data") != entry["result"] else 1)
         elif sys.argv[1] == "resolve":
-            parser = argparse.ArgumentParser(description="Back up and approve one file for reconciliation on the next activation.")
+            parser = argparse.ArgumentParser(description="Check reconciliation, or back up and approve one file for activation.")
             parser.add_argument("--generation", required=True)
             choice = parser.add_mutually_exclusive_group(required=True)
             choice.add_argument("--replace", action="store_true")
             choice.add_argument("--merge-declared", action="store_true")
-            parser.add_argument("file", help="absolute path, or path relative to HOME")
+            choice.add_argument("--check", action="store_true", help="read-only check of all reconciled files")
+            parser.add_argument("file", nargs="?", help="absolute path, or path relative to HOME")
             args = parser.parse_args(sys.argv[2:])
+            if args.check and args.file is not None:
+                parser.error("--check checks all files and does not accept a file argument")
+            if not args.check and args.file is None:
+                parser.error("a file is required for resolution")
             home = os.environ["HOME"]
             state_home = Path(os.environ.get("XDG_STATE_HOME", str(Path(home) / ".local/state")))
             old = state_home / "home-manager/gcroots/current-home"
-            resolve(home, str(old.resolve()) if old.exists() else "", args.generation,
-                    args.file, replace=args.replace)
+            if args.check:
+                report_status(home, str(old.resolve()) if old.exists() else "", args.generation)
+            else:
+                resolve(home, str(old.resolve()) if old.exists() else "", args.generation,
+                        args.file, replace=args.replace)
         else:
             raise ValueError("expected check or apply")
     except (Divergence, OSError, ValueError) as error:
