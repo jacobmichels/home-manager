@@ -22,6 +22,22 @@
       '';
       path-agent = ./test-agent.md;
     };
+    skills = {
+      inline-skill = ''
+        Use this skill when the user asks you to perform an inline operation.
+
+        ## Instructions
+        This skill is defined inline.
+      '';
+      path-skill = ./test-skill.md;
+    };
+    hooks = {
+      inline-hook = ''
+        #!/usr/bin/env bash
+        echo "This hook is defined inline."
+      '';
+      path-hook = ./hooks/test-hook;
+    };
   };
 
   nmt.script = ''
@@ -29,10 +45,20 @@
     assertFileExists home-files/.claude/commands/path-command.md
     assertFileExists home-files/.claude/agents/inline-agent.md
     assertFileExists home-files/.claude/agents/path-agent.md
+    assertFileExists home-files/.claude/skills/inline-skill/SKILL.md
+    assertFileExists home-files/.claude/skills/path-skill/SKILL.md
+    assertFileExists home-files/.claude/hooks/inline-hook
+    assertFileExists home-files/.claude/hooks/path-hook
 
     assertFileContent home-files/.claude/commands/path-command.md \
       ${./test-command.md}
     assertFileContent home-files/.claude/agents/path-agent.md \
       ${./test-agent.md}
+    assertFileContent home-files/.claude/skills/path-skill/SKILL.md \
+      ${./test-skill.md}
+    assertFileContent home-files/.claude/hooks/path-hook \
+      ${./hooks/test-hook}
+    assertFileIsExecutable home-files/.claude/hooks/inline-hook
+    assertFileIsExecutable home-files/.claude/hooks/path-hook
   '';
 }

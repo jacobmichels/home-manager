@@ -77,7 +77,7 @@ let
 
       keybindings = mkOption {
         type = types.attrsOf (types.nullOr types.str);
-        default = lib.mapAttrs (n: lib.mkOptionDefault) {
+        default = lib.mapAttrs (_n: lib.mkOptionDefault) {
           "${cfg.config.modifier}+Return" = "exec ${cfg.config.terminal}";
           "${cfg.config.modifier}+Shift+q" = "kill";
           "${cfg.config.modifier}+d" = "exec ${cfg.config.menu}";
@@ -478,9 +478,9 @@ let
               (keycodebindingsStr keycodebindings)
             ]
             ++ optional (builtins.attrNames bindswitches != [ ]) (bindswitchesStr bindswitches)
-            ++ mapAttrsToList inputStr (filterAttrs (n: v: n == "*") input)
-            ++ mapAttrsToList inputStr (filterAttrs (n: v: hasPrefix "type:" n) input)
-            ++ mapAttrsToList inputStr (filterAttrs (n: v: n != "*" && !(hasPrefix "type:" n)) input)
+            ++ mapAttrsToList inputStr (filterAttrs (n: _v: n == "*") input)
+            ++ mapAttrsToList inputStr (filterAttrs (n: _v: hasPrefix "type:" n) input)
+            ++ mapAttrsToList inputStr (filterAttrs (n: _v: n != "*" && !(hasPrefix "type:" n)) input)
             ++ mapAttrsToList outputStr output # outputs
             ++ mapAttrsToList seatStr seat # seats
             ++ mapAttrsToList (modeStr cfg.config.bindkeysToCode) modes # modes
@@ -532,8 +532,7 @@ in
     package = mkOption {
       type = with types; nullOr package;
       default = pkgs.sway.override {
-        extraSessionCommands = cfg.extraSessionCommands;
-        extraOptions = cfg.extraOptions;
+        inherit (cfg) extraOptions extraSessionCommands;
         withBaseWrapper = cfg.wrapperFeatures.base;
         withGtkWrapper = cfg.wrapperFeatures.gtk;
       };
@@ -551,7 +550,7 @@ in
     systemd = {
       enable = mkOption {
         type = types.bool;
-        default = pkgs.stdenv.isLinux;
+        default = pkgs.stdenv.hostPlatform.isLinux;
         example = false;
         description = ''
           Whether to enable {file}`sway-session.target` on
@@ -704,20 +703,6 @@ in
 
   config = mkIf cfg.enable (
     lib.mkMerge [
-      (mkIf (cfg.config != null) {
-        warnings =
-          (optional (lib.isList cfg.config.fonts) "Specifying sway.config.fonts as a list is deprecated. Use the attrset version instead.")
-          ++ lib.flatten (
-            map (
-              b:
-              optional (lib.isList b.fonts) "Specifying sway.config.bars[].fonts as a list is deprecated. Use the attrset version instead."
-            ) cfg.config.bars
-          )
-          ++ [
-            (mkIf cfg.config.focus.forceWrapping "sway.config.focus.forceWrapping is deprecated, use focus.wrapping instead.")
-          ];
-      })
-
       {
         assertions = [
           (lib.hm.assertions.assertPlatform "wayland.windowManager.sway" pkgs lib.platforms.linux)
@@ -753,6 +738,20 @@ in
           };
         };
       }
+
+      (mkIf (cfg.config != null) {
+        warnings =
+          (optional (lib.isList cfg.config.fonts) "Specifying sway.config.fonts as a list is deprecated. Use the attrset version instead.")
+          ++ lib.flatten (
+            map (
+              b:
+              optional (lib.isList b.fonts) "Specifying sway.config.bars[].fonts as a list is deprecated. Use the attrset version instead."
+            ) cfg.config.bars
+          )
+          ++ [
+            (mkIf cfg.config.focus.forceWrapping "sway.config.focus.forceWrapping is deprecated, use focus.wrapping instead.")
+          ];
+      })
     ]
   );
 }

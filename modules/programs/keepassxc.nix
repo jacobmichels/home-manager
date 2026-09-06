@@ -9,6 +9,8 @@ let
   cfg = config.programs.keepassxc;
 
   iniFormat = pkgs.formats.ini { };
+
+  settingsFile = iniFormat.generate "keepassxc-settings" cfg.settings;
 in
 {
   meta.maintainers = with lib.maintainers; [
@@ -42,28 +44,33 @@ in
     package = lib.mkPackageOption pkgs "keepassxc" { nullable = true; };
 
     settings = lib.mkOption {
-      type = iniFormat.type;
+      inherit (iniFormat) type;
       default = { };
-      example = lib.literalExpression ''
-        {
-          Browser.Enabled = true;
+      example = {
+        Browser.Enabled = true;
 
-          GUI = {
-            AdvancedSettings = true;
-            ApplicationTheme = "dark";
-            CompactMode = true;
-            HidePasswords = true;
-          };
+        GUI = {
+          AdvancedSettings = true;
+          ApplicationTheme = "dark";
+          CompactMode = true;
+          HidePasswords = true;
+        };
 
-          SSHAgent.Enabled = true;
-        }
-      '';
+        SSHAgent.Enabled = true;
+      };
       description = ''
         Configuration written to
         {file}`$XDG_CONFIG_HOME/keepassxc/keepassxc.ini`.
 
-        See <https://github.com/keepassxreboot/keepassxc/blob/647272e9c5542297d3fcf6502e6173c96f12a9a0/src/core/Config.cpp#L49-L223>
+        See <https://github.com/keepassxreboot/keepassxc/blob/develop/src/core/Config.cpp>
         for the full list of options.
+
+        ::: {.note}
+        When the settings are non-empty, the configuration file will be linked
+        into the Nix store and KeePassXC will report an access error for its
+        configuration file. This is expected and can not be fixed in a way that
+        aligns with Home Manager's principles. See [#8257](https://github.com/nix-community/home-manager/issues/8257) for more details.
+        :::
       '';
     };
 
@@ -94,10 +101,18 @@ in
         xdg.autostart.entries = lib.mkIf cfg.autostart [
           "${cfg.package}/share/applications/org.keepassxc.KeePassXC.desktop"
         ];
-        xdg.configFile."keepassxc/keepassxc.ini" = lib.mkIf (cfg.settings != { }) {
-          source = iniFormat.generate "keepassxc-settings" cfg.settings;
-        };
       }
+
+      (lib.mkIf (cfg.settings != { }) {
+        xdg.configFile."keepassxc/keepassxc.ini" = {
+          enable = !pkgs.stdenv.hostPlatform.isDarwin;
+          source = settingsFile;
+        };
+        home.file."Library/Application Support/KeePassXC/keepassxc.ini" = {
+          enable = pkgs.stdenv.hostPlatform.isDarwin;
+          source = settingsFile;
+        };
+      })
 
       (lib.mkIf (cfg.package != null) {
         home.packages = [ cfg.package ];
@@ -105,6 +120,7 @@ in
         programs.chromium.nativeMessagingHosts = [ cfg.package ];
         programs.firefox.nativeMessagingHosts = [ cfg.package ];
         programs.floorp.nativeMessagingHosts = [ cfg.package ];
+        programs.librewolf.nativeMessagingHosts = [ cfg.package ];
         programs.vivaldi.nativeMessagingHosts = [ cfg.package ];
       })
 

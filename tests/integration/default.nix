@@ -28,9 +28,7 @@ let
     standalone-flake-basics = runTest ./standalone/flake-basics.nix;
     standalone-specialisation = runTest ./standalone/specialisation.nix;
     standalone-standard-basics = runTest ./standalone/standard-basics.nix;
+    dconf = runTest ./standalone/dconf.nix;
   };
 in
-tests
-// {
-  all = pkgs.linkFarm "all" (pkgs.lib.mapAttrsToList (name: path: { inherit name path; }) tests);
-}
+tests // { all = pkgs.linkFarm "all" tests; }

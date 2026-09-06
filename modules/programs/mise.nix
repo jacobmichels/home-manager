@@ -7,6 +7,10 @@
 let
   inherit (lib) getExe mkIf mkOption;
   cfg = config.programs.mise;
+  globalConfigPath =
+    if cfg.enableMutableConfig then "mise/conf.d/50-home-manager.toml" else "mise/config.toml";
+  mutableConfigDir = "${config.xdg.configHome}/mise";
+  mutableConfigPath = "${mutableConfigDir}/config.toml";
   tomlFormat = pkgs.formats.toml { };
 in
 {
@@ -14,15 +18,20 @@ in
 
   imports =
     let
-      mkRemovedWarning =
+      mkRtxRemovedWarning =
         opt:
         (lib.mkRemovedOptionModule [ "programs" "rtx" opt ] ''
           The `rtx` package has been replaced by `mise`, please switch over to
           using the options under `programs.mise.*` instead.
         '');
-
     in
-    map mkRemovedWarning [
+    [
+      (lib.mkRenamedOptionModule
+        [ "programs" "mise" "settings" ]
+        [ "programs" "mise" "globalConfig" "settings" ]
+      )
+    ]
+    ++ map mkRtxRemovedWarning [
       "enable"
       "package"
       "enableBashIntegration"
@@ -46,39 +55,64 @@ in
 
       enableNushellIntegration = lib.hm.shell.mkNushellIntegrationOption { inherit config; };
 
+      enableMutableConfig = mkOption {
+        type = lib.types.bool;
+        default = false;
+        example = true;
+        description = ''
+          Whether to leave {file}`$XDG_CONFIG_HOME/mise/config.toml` mutable
+          so it can be updated by commands such as {command}`mise use --global`.
+
+          When enabled, {option}`programs.mise.globalConfig` is written to
+          {file}`$XDG_CONFIG_HOME/mise/conf.d/50-home-manager.toml` instead,
+          leaving the main configuration file unmanaged. The numeric prefix
+          gives user-managed fragments predictable ordering around the Home
+          Manager fragment. An empty mutable configuration file is created
+          because global Mise commands otherwise try to update an existing
+          global fragment, including the read-only Home Manager fragment.
+
+          Keep settings in the mutable file and
+          {option}`programs.mise.globalConfig` disjoint. Mise may resolve
+          conflicts between the global file and {file}`conf.d` differently
+          depending on the current directory.
+
+          Before disabling this option while
+          {option}`programs.mise.globalConfig` is non-empty, remove or back up
+          the mutable configuration file. Home Manager otherwise treats it as a
+          file collision.
+        '';
+      };
+
       globalConfig = mkOption {
-        type = tomlFormat.type;
+        inherit (tomlFormat) type;
+
         default = { };
         example = lib.literalExpression ''
+          settings = {
+            disable_tools = [ "node" ];
+            experimental = true;
+            verbose = false;
+          };
+
+          tool_alias = {
+            node.versions = {
+              my_custom_node = "20";
+            };
+          };
+
           tools = {
             node = "lts";
             python = ["3.10" "3.11"];
           };
-
-          aliases = {
-            my_custom_node = "20";
-          };
         '';
         description = ''
-          Config written to {file}`$XDG_CONFIG_HOME/mise/config.toml`.
+          Global configuration written to
+          {file}`$XDG_CONFIG_HOME/mise/config.toml`, or
+          {file}`$XDG_CONFIG_HOME/mise/conf.d/50-home-manager.toml` when
+          {option}`programs.mise.enableMutableConfig` is enabled.
 
-          See <https://mise.jdx.dev/configuration.html#global-config-config-mise-config-toml>
-          for details on supported values.
-        '';
-      };
-
-      settings = mkOption {
-        type = tomlFormat.type;
-        default = { };
-        example = lib.literalExpression ''
-          verbose = false;
-          experimental = false;
-          disable_tools = ["node"];
-        '';
-        description = ''
-          Settings written to {file}`$XDG_CONFIG_HOME/mise/settings.toml`.
-
-          See <https://mise.jdx.dev/configuration.html#settings-file-config-mise-settings-toml>
+          See <https://mise.jdx.dev/configuration.html> and
+          <https://mise.jdx.dev/configuration/settings.html>
           for details on supported values.
         '';
       };
@@ -103,22 +137,39 @@ in
           The shell integration will not be added.
         '';
 
-    home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
+    home.packages = lib.mkIf (cfg.package != null) [
+      cfg.package
+      # The generated completions call the `usage` CLI at completion time.
+      pkgs.usage
+    ];
+
+    home.activation.miseMutableConfig = mkIf cfg.enableMutableConfig (
+      lib.hm.dag.entryAfter [ "linkGeneration" ] ''
+        if [[ ! -e ${lib.escapeShellArg mutableConfigPath} && ! -L ${lib.escapeShellArg mutableConfigPath} ]]; then
+          run mkdir -p ${lib.escapeShellArg mutableConfigDir}
+          run touch ${lib.escapeShellArg mutableConfigPath}
+        fi
+      ''
+    );
 
     xdg.configFile = {
-      "mise/config.toml" = mkIf (cfg.globalConfig != { }) {
+      ${globalConfigPath} = mkIf (cfg.globalConfig != { }) {
         source = tomlFormat.generate "mise-config" cfg.globalConfig;
-      };
-
-      "mise/settings.toml" = mkIf (cfg.settings != { }) {
-        source = tomlFormat.generate "mise-settings" cfg.settings;
       };
     };
 
     programs = {
-      bash.initExtra = mkIf (cfg.enableBashIntegration && cfg.package != null) ''
-        eval "$(${getExe cfg.package} activate bash)"
-      '';
+      bash.initExtra =
+        let
+          # TODO: Upstream to nixpkgs
+          bashCompletion = pkgs.runCommand "mise-bash-completion.bash" { } ''
+            ${getExe cfg.package} completion bash --include-bash-completion-lib > $out
+          '';
+        in
+        mkIf (cfg.enableBashIntegration && cfg.package != null) ''
+          eval "$(${getExe cfg.package} activate bash)"
+          source ${bashCompletion}
+        '';
 
       zsh.initContent = mkIf (cfg.enableZshIntegration && cfg.package != null) ''
         eval "$(${getExe cfg.package} activate zsh)"

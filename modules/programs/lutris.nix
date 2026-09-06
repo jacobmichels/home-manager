@@ -24,12 +24,15 @@ let
     recursiveUpdate
     listToAttrs
     getExe
+    versionOlder
     ;
   cfg = config.programs.lutris;
   settingsFormat = pkgs.formats.yaml { };
   formatWineName = (package: toLower package.name);
 in
 {
+  meta.maintainers = [ lib.hm.maintainers.bikku ];
+
   options.programs.lutris = {
     enable = mkEnableOption "lutris.";
     package = lib.mkPackageOption pkgs "lutris" { };
@@ -102,7 +105,7 @@ in
               description = ''
                 The package to use for this runner, nix will try to find the executable for this package.
                 A more specific path can be set by using settings.runner.runner_executable instead.
-                Uncompatible with certain runners, such as wine.
+                Incompatible with certain runners, such as wine.
               '';
               type = types.nullOr types.package;
             };
@@ -127,7 +130,7 @@ in
                           default = "";
                           description = ''
                             Specific option to point to a runner executable directly, don't set runner.package if you set this.
-                            Uncompatible with certain runners such as wine.
+                            Incompatible with certain runners such as wine.
                           '';
                         };
                       };
@@ -150,7 +153,6 @@ in
       );
     };
   };
-  meta.maintainers = [ lib.hm.maintainers.bikku ];
   config = mkIf cfg.enable {
     assertions = [
       (lib.hm.assertions.assertPlatform "programs.lutris" pkgs lib.platforms.linux)
@@ -188,7 +190,7 @@ in
         lutris-overrides = {
           # This only adds pkgs.steam to the extraPkgs, I see no reason to ever enable it.
           steamSupport = false;
-          extraPkgs = (prev: cfg.extraPackages ++ optional (cfg.steamPackage != null) cfg.steamPackage);
+          extraPkgs = (_prev: cfg.extraPackages ++ optional (cfg.steamPackage != null) cfg.steamPackage);
         };
       in
       [ (cfg.package.override lutris-overrides) ];
@@ -198,7 +200,7 @@ in
         buildRunnerConfig = (
           runner_name: runner_config:
           # Remove the unset values so they don't end up on the final config.
-          filterAttrsRecursive (name: value: value != { } && value != null && value != "") {
+          filterAttrsRecursive (_name: value: value != { } && value != null && value != "") {
             "${runner_name}" =
               runner_config.settings.runner
               # If set translate .package to runner_executable
@@ -237,8 +239,10 @@ in
               source = package;
             })
           ) packages;
-        steamcompattools = map (proton: proton.steamcompattool) cfg.protonPackages;
+        differentiatesProton = versionOlder cfg.package.version "0.5.20";
+        protonPackages = map (proton: proton.steamcompattool) cfg.protonPackages;
+        protonDirectory = if differentiatesProton then "proton" else "wine";
       in
-      listToAttrs (buildWineLink "wine" cfg.winePackages ++ buildWineLink "proton" steamcompattools);
+      listToAttrs (buildWineLink "wine" cfg.winePackages ++ buildWineLink protonDirectory protonPackages);
   };
 }

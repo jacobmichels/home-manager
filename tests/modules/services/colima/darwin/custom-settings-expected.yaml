@@ -1,0 +1,6 @@
+%YAML 1.1
+---
+cpu: 4
+kubernetes:
+  enabled: true
+memory: 8

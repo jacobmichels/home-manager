@@ -11,7 +11,7 @@ let
   settingsFormat = pkgs.formats.toml { };
 
   configDir =
-    if pkgs.stdenv.isDarwin then
+    if pkgs.stdenv.hostPlatform.isDarwin then
       "Library/Application Support/org.dystroy.bacon"
     else
       "${config.xdg.configHome}/bacon";
@@ -26,7 +26,7 @@ in
     package = lib.mkPackageOption pkgs "bacon" { nullable = true; };
 
     settings = lib.mkOption {
-      type = settingsFormat.type;
+      inherit (settingsFormat) type;
       default = { };
       example = {
         jobs.default = {

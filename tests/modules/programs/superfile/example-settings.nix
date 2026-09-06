@@ -6,7 +6,7 @@
 }:
 
 {
-  xdg.enable = lib.mkIf pkgs.stdenv.isDarwin false;
+  xdg.enable = lib.mkIf pkgs.stdenv.hostPlatform.isDarwin false;
 
   programs.superfile = {
     enable = true;
@@ -53,13 +53,30 @@
         ];
       };
     };
+    firstUseCheck = false;
+    pinnedFolders = [
+      {
+        name = "Nix Store";
+        location = "/nix/store";
+      }
+    ];
   };
 
   nmt.script =
     let
       configSubPath =
-        if !pkgs.stdenv.isDarwin then ".config/superfile" else "Library/Application Support/superfile";
+        if !pkgs.stdenv.hostPlatform.isDarwin then
+          ".config/superfile"
+        else
+          "Library/Application Support/superfile";
       configBasePath = "home-files/" + configSubPath;
+
+      dataSubPath =
+        if !pkgs.stdenv.hostPlatform.isDarwin then
+          ".local/share/superfile"
+        else
+          "Library/Application Support/superfile";
+      dataBasePath = "home-files/" + dataSubPath;
     in
     ''
       assertFileExists "${configBasePath}/config.toml"
@@ -82,5 +99,10 @@
       assertFileContent \
         "${configBasePath}/theme/test2.toml" \
         ${./example-theme2-expected.toml}
+      assertFileExists "${dataBasePath}/firstUseCheck"
+      assertFileExists "${dataBasePath}/pinned.json"
+      assertFileContent \
+        "${dataBasePath}/pinned.json" \
+        ${./example-pinned-folders.json}
     '';
 }

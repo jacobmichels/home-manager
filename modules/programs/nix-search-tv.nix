@@ -19,7 +19,7 @@ in
     package = lib.mkPackageOption pkgs "nix-search-tv" { nullable = true; };
 
     settings = lib.mkOption {
-      type = jsonFormat.type;
+      inherit (jsonFormat) type;
       default = { };
       description = ''
         Configuration written to {file}`$XDG_CONFIG_HOME/nix-search-tv/config.json`.
@@ -55,6 +55,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.package != null || cfg.enableTelevisionIntegration;
+        message = "Cannot enable television integration when config.programs.nix-search-tv.package is null.";
+      }
+    ];
+
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
 
     xdg.configFile."nix-search-tv/config.json" = lib.mkIf (cfg.settings != { }) {
@@ -63,7 +70,9 @@ in
 
     programs.television.channels.nix-search-tv = lib.mkIf cfg.enableTelevisionIntegration (
       let
-        path = lib.getExe cfg.package;
+        nix-search-tv-path = if cfg.package != null then lib.getExe cfg.package else "nix-search-tv";
+        keybinding_modifier = if pkgs.stdenv.hostPlatform.isDarwin then "alt" else "ctrl";
+        opener = if pkgs.stdenv.hostPlatform.isDarwin then "open" else "xdg-open";
       in
       {
         metadata = {
@@ -71,16 +80,37 @@ in
           description = "Search nix options and packages";
         };
 
-        source.command = "${path} print";
-        preview.command = ''${path} preview "{}"'';
+        source.command = "${nix-search-tv-path} print";
+        preview.command = ''${nix-search-tv-path} preview "{}"'';
+
+        keybindings = {
+          "${keybinding_modifier}-r" = "actions:run";
+          "${keybinding_modifier}-i" = "actions:shell";
+          "${keybinding_modifier}-s" = "actions:source";
+          "${keybinding_modifier}-o" = "actions:homepage";
+        };
+
+        actions.run = {
+          description = "Run the package";
+          command = ''nix run {replace:s/\/ /#/g}'';
+          mode = "execute";
+        };
+        actions.shell = {
+          description = "Enter new nix shell with this package";
+          command = ''nix shell {replace:s/\/ /#/g}'';
+          mode = "execute";
+        };
+        actions.source = {
+          description = "Open link to source code";
+          command = "${nix-search-tv-path} source '{}' | xargs ${opener}";
+          mode = "execute";
+        };
+        actions.homepage = {
+          description = "Open link to homepage";
+          command = "${nix-search-tv-path} homepage '{}' | xargs ${opener}";
+          mode = "execute";
+        };
       }
     );
-
-    assertions = [
-      {
-        assertion = cfg.package != null || cfg.enableTelevisionIntegration;
-        message = "Cannot enable television integration when config.programs.nix-search-tv.package is null.";
-      }
-    ];
   };
 }

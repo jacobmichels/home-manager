@@ -31,7 +31,7 @@ in
       inherit (tomlFormat) type;
       default = { };
       description = "";
-      example = lib.literalExpression "";
+      example = "";
     };
 
     enableZshIntegration = hm.shell.mkZshIntegrationOption { inherit config; };
@@ -52,7 +52,7 @@ in
       eval "$(sheldon source)"
     '';
 
-    programs.zsh.initExtra = mkIf cfg.enableZshIntegration ''
+    programs.zsh.initContent = mkIf cfg.enableZshIntegration ''
       eval "$(sheldon source)"
     '';
 

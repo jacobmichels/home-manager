@@ -7,27 +7,50 @@
 
 let
 
-  cfg = lib.filterAttrs (n: f: f.enable) config.home.file;
+  cfg =
+    let
+      allFiles = lib.attrValues config.home.file;
+      enabledFiles = lib.filter (f: f.enable) allFiles;
 
-  homeDirectory = config.home.homeDirectory;
+      # We sort to ascending target path length. This ensures that a directory
+      # end up earlier in the list so that we can more easily detect when
+      # another file is placed inside this directory.
+      #
+      # Specifically, we want to detect two cases:
+      #
+      # - A directory is symlinked to the target, attempting to place a file
+      #   inside this directory is an error since it would entail modifying the
+      #   source directory.
+      #
+      # - A directory is recursively symlinked to the target, attempting to
+      #   place a file inside this directory is allowed. If the placed file
+      #   overlaps with a path from the recursively symlinked directory it will
+      #   override the one from the directory.
+      sortedFiles = lib.lists.sortOn (f: lib.stringLength f.target) enabledFiles;
+    in
+    sortedFiles;
 
-  reconciled = lib.filterAttrs (_: f: f.reconciliation.enable) cfg;
+  reconciled = lib.filter (f: f.reconciliation.enable) cfg;
   reconciliationManifest = pkgs.writeText "home-manager-reconciliation.json" (
-    builtins.toJSON (map (f: f.target) (lib.attrValues reconciled))
+    builtins.toJSON (map (f: f.target) reconciled)
   );
   reconcile = "${pkgs.python3}/bin/python3 ${./files/reconcile.py}";
-  skipReconciled = lib.optionalString (reconciled != { }) ''
+  skipReconciled = lib.optionalString (reconciled != [ ]) ''
     case "$relativePath" in
-      ${
-        lib.concatMapStringsSep "|" (f: lib.escapeShellArg f.target) (lib.attrValues reconciled)
-      }) continue ;;
+      ${lib.concatMapStringsSep "|" (f: lib.escapeShellArg f.target) reconciled}) continue ;;
     esac
   '';
 
-  fileType =
-    (import lib/file-type.nix {
-      inherit homeDirectory lib pkgs;
-    }).fileType;
+  inherit (config.home) fileOverlapResolution homeDirectory;
+
+  inherit
+    (
+      (import ./lib/file-type.nix {
+        inherit homeDirectory lib pkgs;
+      })
+    )
+    fileType
+    ;
 
   sourceStorePath =
     file:
@@ -53,6 +76,29 @@ in
       type = fileType "home.file" "{env}`HOME`" homeDirectory;
     };
 
+    home.fileOverlapResolution = lib.mkOption {
+      type = lib.types.enum [
+        "ignore"
+        "error"
+        "override"
+      ];
+      default = "ignore";
+      visible = false;
+      description = ''
+        Determines how to handle a conflict between a file occurring due to
+        recursive symlinking and regular symlinking.
+
+        The default, "ignore", is the one most closely matching the legacy
+        behavior. It keeps the recursively linked file and ignores the regularly
+        symlinked one. The "error" alternative causes the `file-files` build to
+        error out. The "override" alternative replaces the recursively linked
+        file by the regularly linked one.
+
+        This option should be considered experimental and is therefore hidden
+        from documentation at this time.
+      '';
+    };
+
     home-files = lib.mkOption {
       type = lib.types.package;
       internal = true;
@@ -65,8 +111,8 @@ in
       (
         let
           dups = lib.attrNames (
-            lib.filterAttrs (n: v: v > 1) (
-              lib.foldAttrs (acc: v: acc + v) 0 (lib.mapAttrsToList (n: v: { ${v.target} = 1; }) cfg)
+            lib.filterAttrs (_n: v: v > 1) (
+              lib.foldAttrs (acc: v: acc + v) 0 (map (v: { ${v.target} = 1; }) cfg)
             )
           );
           dupsStr = lib.concatStringsSep ", " dups;
@@ -85,9 +131,9 @@ in
         }
       )
     ]
-    ++ lib.mapAttrsToList (name: f: {
+    ++ map (f: {
       assertion = !f.recursive && !f.force;
-      message = "Reconciled file ${name} cannot use recursive or force.";
+      message = "Reconciled file ${f.target} cannot use recursive or force.";
     }) reconciled;
 
     home.extraBuilderCommands = ''
@@ -114,7 +160,7 @@ in
         pathStr = toString path;
         name = lib.hm.strings.storeFileName (baseNameOf pathStr);
       in
-      pkgs.runCommandLocal name { } ''ln -s ${lib.escapeShellArg pathStr} $out'';
+      pkgs.runCommandLocal name { } "ln -s ${lib.escapeShellArg pathStr} $out";
 
     # This verifies that the links we are about to create will not
     # overwrite an existing file.
@@ -123,7 +169,7 @@ in
         # Paths that should be forcibly overwritten by Home Manager.
         # Caveat emptor!
         forcedPaths = lib.concatMapStringsSep " " (p: ''"$HOME"/${lib.escapeShellArg p}'') (
-          lib.mapAttrsToList (n: v: v.target) (lib.filterAttrs (n: v: v.force) cfg)
+          map (v: v.target) (lib.filter (v: v.force) cfg)
         );
 
         storeDir = lib.escapeShellArg builtins.storeDir;
@@ -171,21 +217,110 @@ in
 
           newGenFiles="$1"
           shift
+
+          # Classify every target using bash builtins only: even one forked
+          # process per file costs several milliseconds on some platforms
+          # (notably darwin), which dominates activation time when a profile
+          # carries hundreds of links. Targets occupied by a regular file or
+          # directory keep the original per-file handling (backup and
+          # identical-content skip) on the slow path below.
+          declare -a symlinkTargets=() symlinkSources=()
+          declare -a linkSources=() linkDirs=()
+          declare -a slowSources=()
           for sourcePath in "$@" ; do
             relativePath="''${sourcePath#$newGenFiles/}"
             ${skipReconciled}
             targetPath="$HOME/$relativePath"
-            if [[ -e "$targetPath" && ! -L "$targetPath" && -n "$HOME_MANAGER_BACKUP_EXT" ]] ; then
-              # The target exists, back it up
-              backup="$targetPath.$HOME_MANAGER_BACKUP_EXT"
-              if [[ -e "$backup" && -n "$HOME_MANAGER_BACKUP_OVERWRITE" ]]; then
-                run rm $VERBOSE_ARG "$backup"
+            if [[ -L "''${targetPath%/*}" ]] ; then
+              # The parent directory is itself a symlink (e.g. a stale
+              # whole-directory link from an older layout). The batched
+              # `ln -n -t` below would refuse it ("Not a directory"), while
+              # the original per-file `ln -T` traverses it; keep upstream
+              # behavior on the slow path.
+              slowSources+=("$sourcePath")
+            elif [[ -L "$targetPath" ]] ; then
+              symlinkTargets+=("$targetPath")
+              symlinkSources+=("$sourcePath")
+            elif [[ -e "$targetPath" ]] ; then
+              slowSources+=("$sourcePath")
+            else
+              linkSources+=("$sourcePath")
+              linkDirs+=("''${targetPath%/*}")
+            fi
+          done
+
+          # Resolve all existing symlinks with a single readlink call and
+          # relink only those not already pointing at the new generation.
+          if [[ ''${#symlinkTargets[@]} -gt 0 ]] ; then
+            i=0
+            while IFS= read -r -d "" currentSource ; do
+              if [[ "$currentSource" != "''${symlinkSources[i]}" ]] ; then
+                linkSources+=("''${symlinkSources[i]}")
+                linkDirs+=("''${symlinkTargets[i]%/*}")
               fi
-              run mv $VERBOSE_ARG "$targetPath" "$backup" || errorEcho "Moving '$targetPath' failed!"
+              i=$(( i + 1 ))
+            done < <(readlink -z -- "''${symlinkTargets[@]}")
+
+            # readlink prints no record for an operand that vanished since
+            # the classification loop above, and its exit status is lost
+            # through the process substitution. A missing record shifts
+            # every later result onto the wrong source, so the links after
+            # it would be compared against someone else's target and left
+            # stale. The record count is the only signal that happened.
+            if [[ $i -ne ''${#symlinkTargets[@]} ]] ; then
+              errorEcho "A link target changed while resolving symlinks; retry activation."
+              exit 1
+            fi
+          fi
+
+          # Create all missing parent directories in one mkdir call.
+          declare -A missingDirs=()
+          for targetDir in "''${linkDirs[@]}" ; do
+            [[ -d "$targetDir" ]] || missingDirs[$targetDir]=1
+          done
+          if [[ ''${#missingDirs[@]} -gt 0 ]] ; then
+            run mkdir -p $VERBOSE_ARG -- "''${!missingDirs[@]}" || exit 1
+          fi
+
+          # Group the pending links by parent directory, one ln call per
+          # directory. The link name always equals the source basename, and
+          # -f -n together replace a stale symlink even when it points at a
+          # directory (the case -T guarded against in the per-file version;
+          # a regular directory in the way takes the slow path instead and
+          # fails there just like it always did).
+          declare -A dirBatches=()
+          for i in "''${!linkSources[@]}" ; do
+            dirBatches[''${linkDirs[i]}]+="$i "
+          done
+          for targetDir in "''${!dirBatches[@]}" ; do
+            batch=()
+            for i in ''${dirBatches[$targetDir]} ; do
+              batch+=("''${linkSources[i]}")
+            done
+            run ln -sfn $VERBOSE_ARG -t "$targetDir" -- "''${batch[@]}" || exit 1
+          done
+
+          # Slow path: the target exists and is not a symlink. This is the
+          # original per-file logic, kept verbatim for the rare collisions.
+          for sourcePath in "''${slowSources[@]}" ; do
+            relativePath="''${sourcePath#$newGenFiles/}"
+            targetPath="$HOME/$relativePath"
+            if [[ -e "$targetPath" && ! -L "$targetPath" ]] ; then
+              if [[ -n "$HOME_MANAGER_BACKUP_COMMAND" ]] ; then
+                verboseEcho "Running '$HOME_MANAGER_BACKUP_COMMAND' on '$targetPath'."
+                run $HOME_MANAGER_BACKUP_COMMAND "$targetPath" || errorEcho "Running '$HOME_MANAGER_BACKUP_COMMAND' on '$targetPath' failed."
+              elif [[ -n "$HOME_MANAGER_BACKUP_EXT" ]] ; then
+                # The target exists, back it up
+                backup="$targetPath.$HOME_MANAGER_BACKUP_EXT"
+                if [[ -e "$backup" && -n "$HOME_MANAGER_BACKUP_OVERWRITE" ]]; then
+                  run rm $VERBOSE_ARG "$backup"
+                fi
+                run mv $VERBOSE_ARG "$targetPath" "$backup" || errorEcho "Moving '$targetPath' failed!"
+              fi
             fi
 
             if [[ -e "$targetPath" && ! -L "$targetPath" ]] && cmp -s "$sourcePath" "$targetPath" ; then
-              # The target exists but is identical – don't do anything.
+              # The target exists but is identical - don't do anything.
               verboseEcho "Skipping '$targetPath' as it is identical to '$sourcePath'"
             else
               # Place that symlink, --force
@@ -308,7 +443,7 @@ in
               && changedFiles[${targetArg}]=0 \
               || changedFiles[${targetArg}]=1
           ''
-      ) (lib.filter (v: v.onChange != "") (lib.attrValues cfg))
+      ) (lib.filter (v: v.onChange != "") cfg)
       + ''
         unset -f _cmp
       ''
@@ -324,7 +459,7 @@ in
             ${v.onChange}
           fi
         fi
-      '') (lib.filter (v: v.onChange != "") (lib.attrValues cfg))
+      '') (lib.filter (v: v.onChange != "") cfg)
     );
 
     # Symlink directories and files that have the right execute bit.
@@ -332,7 +467,7 @@ in
     home-files =
       pkgs.runCommandLocal "home-manager-files"
         {
-          nativeBuildInputs = [ pkgs.xorg.lndir ];
+          nativeBuildInputs = [ pkgs.lndir ];
         }
         (
           ''
@@ -340,6 +475,69 @@ in
 
             # Needed in case /nix is a symbolic link.
             realOut="$(realpath -m "$out")"
+
+            # An associative array of previously handled target paths. This is
+            # the path handled for the declared file in home.file. That is, if a
+            # file has been specified as recursive, then this array will only
+            # contain the recursion root, not the visited files.
+            declare -A seenTargets
+
+            function setExecutableBit() {
+              local target="$1"
+              local executable="$2"
+
+              if [[ $executable == inherit ]]; then
+                # Don't change file mode if it should match the source.
+                :
+              elif [[ $executable ]]; then
+                chmod +x "$target"
+              else
+                chmod -x "$target"
+              fi
+            }
+
+            function insertFileEntry() {
+              local source="$1"
+              local target="$2"
+              local executable="$3"
+              local isExecutable
+
+              [[ -x $source ]] && isExecutable=1 || isExecutable=""
+
+              # Link the file into the home file directory if possible,
+              # i.e., if the executable bit of the source is the same we
+              # expect for the target. Otherwise, we copy the file and
+              # set the executable bit to the expected value.
+              if [[ $executable == inherit || $isExecutable == $executable ]]; then
+                ln -s "$source" "$target"
+              else
+                cp "$source" "$target"
+                setExecutableBit "$target" "$executable"
+              fi
+            }
+
+            function setLinkedFileExecutableBit() {
+              local target="$1"
+              local executable="$2"
+              local isExecutable
+
+              if [[ -d $target || ! -e $target ]]; then
+                return
+              fi
+
+              [[ -x $target ]] && isExecutable=1 || isExecutable=""
+
+              if [[ $executable == inherit || $isExecutable == $executable ]]; then
+                return
+              fi
+
+              local tmp
+              tmp="$(mktemp "$target.XXXXXX")"
+
+              cp "$target" "$tmp"
+              setExecutableBit "$tmp" "$executable"
+              mv -f "$tmp" "$target"
+            }
 
             function insertFile() {
               local source="$1"
@@ -354,14 +552,34 @@ in
                 exit 1
               fi
 
-              # If the target already exists then we have a collision. Note, this
+              # If the target has already been seen then we have a collision. Note, this
               # should not happen due to the assertion found in the 'files' module.
-              # We therefore simply log the conflict and otherwise ignore it, mainly
-              # to make the `files-target-config` test work as expected.
-              if [[ -e "$realOut/$relTarget" ]]; then
+              # We therefore simply log the conflict and otherwise ignore it,
+              # mainly to make the `files-target-conflict` test work as expected.
+              if [[ ''${seenTargets["$relTarget"]} ]]; then
                 echo "File conflict for file '$relTarget'" >&2
                 return
               fi
+
+              # If the path already exists as a non-directory, then we are
+              # conflicting with a file from a recursively linked directory. Log
+              # this fact and error out the build.
+              if [[ -e "$realOut/$relTarget" && ! -d "$realOut/$relTarget" ]]; then
+                echo "$relTarget conflicts with recursively symlinked file" >&2
+                ${
+                  if fileOverlapResolution == "ignore" then
+                    "return"
+                  else if fileOverlapResolution == "error" then
+                    "exit 1"
+                  else if fileOverlapResolution == "override" then
+                    ''rm "$realOut/$relTarget"''
+                  else
+                    abort ''Unknown file resolution overlap "${fileOverlapResolution}"''
+                }
+              fi
+
+              # Record that we have seen this target file.
+              seenTargets["$relTarget"]=1
 
               # Figure out the real absolute path to the target.
               local target
@@ -382,35 +600,29 @@ in
                   else
                     lndir -silent "$source" "$target"
                   fi
+
+                  if [[ $executable != inherit ]]; then
+                    local linkedFile
+
+                    while IFS= read -r -d "" linkedFile; do
+                      setLinkedFileExecutableBit "$linkedFile" "$executable"
+                    done < <(find "$target" \( -type f -or -type l \) -print0)
+                  fi
                 else
                   ln -s "$source" "$target"
                 fi
               else
-                [[ -x $source ]] && isExecutable=1 || isExecutable=""
-
-                # Link the file into the home file directory if possible,
-                # i.e., if the executable bit of the source is the same we
-                # expect for the target. Otherwise, we copy the file and
-                # set the executable bit to the expected value.
-                if [[ ! $reconciled && ( $executable == inherit || $isExecutable == $executable ) ]]; then
-                  ln -s "$source" "$target"
-                else
+                if [[ $reconciled ]]; then
                   cp "$source" "$target"
-
-                  if [[ $executable == inherit ]]; then
-                    # Don't change file mode if it should match the source.
-                    :
-                  elif [[ $executable ]]; then
-                    chmod +x "$target"
-                  else
-                    chmod -x "$target"
-                  fi
+                  setExecutableBit "$target" "$executable"
+                else
+                  insertFileEntry "$source" "$target" "$executable"
                 fi
               fi
             }
           ''
           + lib.concatStrings (
-            lib.mapAttrsToList (n: v: ''
+            map (v: ''
               insertFile ${
                 lib.escapeShellArgs [
                   (sourceStorePath v)

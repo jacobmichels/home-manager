@@ -1,4 +1,7 @@
-{ lib, ... }:
+{
+  lib,
+  ...
+}:
 
 {
   meta.maintainers = with lib.maintainers; [ midchildan ];
@@ -7,7 +10,9 @@
     ./user-defaults
     ./fonts.nix
     ./keybindings.nix
+    ./copyapps.nix
     ./linkapps.nix
     ./search.nix
+    ./terminfo.nix
   ];
 }

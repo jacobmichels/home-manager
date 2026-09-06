@@ -1,6 +1,7 @@
 {
   config,
   lib,
+  options,
   pkgs,
   ...
 }:
@@ -18,52 +19,65 @@ in
 {
   meta.maintainers = [ lib.maintainers.c0deaddict ];
 
+  imports = [
+    (lib.mkChangedOptionModule
+      [ "services" "swayidle" "systemdTarget" ]
+      [ "services" "swayidle" "systemdTargets" ]
+      (config: lib.toList (lib.getAttrFromPath [ "services" "swayidle" "systemdTarget" ] config))
+    )
+  ];
+
   options.services.swayidle =
     let
 
-      timeoutModule =
-        { ... }:
-        {
-          options = {
-            timeout = mkOption {
-              type = types.ints.positive;
-              example = 60;
-              description = "Timeout in seconds.";
-            };
+      timeoutModule = {
+        options = {
+          timeout = mkOption {
+            type = types.ints.positive;
+            example = 60;
+            description = "Timeout in seconds.";
+          };
 
-            command = mkOption {
-              type = types.str;
-              description = "Command to run after timeout seconds of inactivity.";
-            };
+          command = mkOption {
+            type = types.str;
+            description = "Command to run after timeout seconds of inactivity.";
+          };
 
-            resumeCommand = mkOption {
-              type = with types; nullOr str;
-              default = null;
-              description = "Command to run when there is activity again.";
-            };
+          resumeCommand = mkOption {
+            type = with types; nullOr str;
+            default = null;
+            description = "Command to run when there is activity again.";
           };
         };
+      };
 
-      eventModule =
-        { ... }:
-        {
-          options = {
-            event = mkOption {
-              type = types.enum [
-                "before-sleep"
-                "after-resume"
-                "lock"
-                "unlock"
-              ];
-              description = "Event name.";
-            };
+      eventsModule = {
+        options = {
+          before-sleep = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = "Command to run before suspending.";
+          };
 
-            command = mkOption {
-              type = types.str;
-              description = "Command to run when event occurs.";
-            };
+          after-resume = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = "Command to run after resuming.";
+          };
+
+          lock = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = "Command to run when the logind session is locked.";
+          };
+
+          unlock = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = "Command to run when the logind session is unlocked.";
           };
         };
+      };
 
     in
     {
@@ -84,13 +98,23 @@ in
       };
 
       events = mkOption {
-        type = with types; listOf (submodule eventModule);
-        default = [ ];
+        type =
+          with types;
+          coercedTo (listOf attrs) (
+            events:
+            lib.listToAttrs (
+              map (e: {
+                name = e.event;
+                value = e.command;
+              }) events
+            )
+          ) (submodule eventsModule);
+        default = { };
         example = literalExpression ''
-          [
-            { event = "before-sleep"; command = "''${pkgs.swaylock}/bin/swaylock -fF"; }
-            { event = "lock"; command = "lock"; }
-          ]
+          {
+            "before-sleep" = "''${pkgs.swaylock}/bin/swaylock -fF";
+            "lock" = "lock";
+          }
         '';
         description = "Run command on occurrence of a event.";
       };
@@ -101,19 +125,34 @@ in
         description = "Extra arguments to pass to swayidle.";
       };
 
-      systemdTarget = mkOption {
-        type = types.str;
-        default = config.wayland.systemd.target;
-        defaultText = literalExpression "config.wayland.systemd.target";
-        example = "sway-session.target";
+      systemdTargets = mkOption {
+        type = with types; listOf str;
+        default = [ config.wayland.systemd.target ];
+        defaultText = literalExpression "[ config.wayland.systemd.target ]";
+        example = [ "sway-session.target" ];
         description = ''
-          Systemd target to bind to.
+          Systemd targets to bind to.
         '';
       };
 
     };
 
   config = lib.mkIf cfg.enable {
+    warnings = lib.optional (lib.any builtins.isList options.services.swayidle.events.definitions) (
+      lib.hm.deprecations.mkDeprecatedOptionValueWarning {
+        option = [
+          "services"
+          "swayidle"
+          "events"
+        ];
+        old = "a list";
+        replacement = "an attribute set keyed by event name";
+        details = ''
+          Use event names as attribute keys and commands as values.
+        '';
+      }
+    );
+
     assertions = [
       (lib.hm.assertions.assertPlatform "services.swayidle" pkgs lib.platforms.linux)
     ];
@@ -125,8 +164,8 @@ in
         Description = "Idle manager for Wayland";
         Documentation = "man:swayidle(1)";
         ConditionEnvironment = "WAYLAND_DISPLAY";
-        PartOf = [ cfg.systemdTarget ];
-        After = [ cfg.systemdTarget ];
+        PartOf = cfg.systemdTargets;
+        After = cfg.systemdTargets;
       };
 
       Service = {
@@ -148,19 +187,23 @@ in
                 t.resumeCommand
               ];
 
-            mkEvent = e: [
-              e.event
-              e.command
+            mkEvent = event: command: [
+              event
+              command
             ];
 
+            nonemptyEvents = lib.filterAttrs (_event: command: command != null) cfg.events;
+
             args =
-              cfg.extraArgs ++ (lib.concatMap mkTimeout cfg.timeouts) ++ (lib.concatMap mkEvent cfg.events);
+              cfg.extraArgs
+              ++ (lib.concatMap mkTimeout cfg.timeouts)
+              ++ (lib.flatten (lib.mapAttrsToList mkEvent nonemptyEvents));
           in
           "${lib.getExe cfg.package} ${lib.escapeShellArgs args}";
       };
 
       Install = {
-        WantedBy = [ cfg.systemdTarget ];
+        WantedBy = cfg.systemdTargets;
       };
     };
   };

@@ -55,12 +55,10 @@ let
       only = mkOption {
         type = types.listOf types.str;
         default = [ ];
-        example = literalExpression ''
-          [
-            "bash"
-            "/usr/bin/sh"
-          ]
-        '';
+        example = [
+          "bash"
+          "/usr/bin/sh"
+        ];
         description = ''
           Apply redirection ONLY to specified executable names.
         '';
@@ -78,11 +76,9 @@ let
       env = mkOption {
         type = types.attrsOf types.str;
         default = { };
-        example = literalExpression ''
-          {
-            MY_ENV_VAR = "my_env_var_value";
-          }
-        '';
+        example = {
+          MY_ENV_VAR = "my_env_var_value";
+        };
         description = ''
           Give certain environment variables for said match.
         '';
@@ -91,6 +87,8 @@ let
   };
 in
 {
+  meta.maintainers = [ lib.maintainers.nikp123 ];
+
   options.programs.boxxy = {
     enable = lib.mkEnableOption "boxxy: Boxes in badly behaving applications";
 
@@ -109,11 +107,9 @@ in
     ];
 
     home.file = lib.mkIf (cfg.rules != [ ]) {
-      "${configPath}".source = settingsFormat.generate "boxxy-config.yaml" { rules = cfg.rules; };
+      "${configPath}".source = settingsFormat.generate "boxxy-config.yaml" { inherit (cfg) rules; };
     };
 
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
   };
-
-  meta.maintainers = with lib.hm.maintainers; [ nikp123 ];
 }

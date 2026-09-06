@@ -13,12 +13,10 @@ let
     mkIf
     mkMerge
     mkDefault
-    mkAliasOptionModule
     types
     literalExpression
     escapeShellArg
     hm
-    getAttrFromPath
     any
     optional
     ;
@@ -60,12 +58,28 @@ let
           example = "X_cursor";
           description = "The default cursor file to use within the package.";
         };
+
+        size = mkOption {
+          type = types.int;
+          example = 32;
+          default = config.home.pointerCursor.size;
+          defaultText = "config.home.pointerCursor.size";
+          description = "The cursor size for x11.";
+        };
       };
 
       gtk = {
         enable = mkEnableOption ''
           gtk config generation for {option}`home.pointerCursor`
         '';
+
+        size = mkOption {
+          type = types.int;
+          example = 32;
+          default = config.home.pointerCursor.size;
+          defaultText = "config.home.pointerCursor.size";
+          description = "The cursor size for gtk.";
+        };
       };
 
       dotIcons = {
@@ -92,6 +106,14 @@ let
 
       sway = {
         enable = mkEnableOption "sway config generation for {option}`home.pointerCursor`";
+
+        size = mkOption {
+          type = types.int;
+          example = 32;
+          default = config.home.pointerCursor.size;
+          defaultText = "config.home.pointerCursor.size";
+          description = "The cursor size for sway.";
+        };
       };
     };
   };
@@ -116,46 +138,10 @@ in
 {
   meta.maintainers = [ lib.maintainers.league ];
 
-  imports = [
-    (mkAliasOptionModule
-      [ "xsession" "pointerCursor" "package" ]
-      [
-        "home"
-        "pointerCursor"
-        "package"
-      ]
-    )
-    (mkAliasOptionModule
-      [ "xsession" "pointerCursor" "name" ]
-      [
-        "home"
-        "pointerCursor"
-        "name"
-      ]
-    )
-    (mkAliasOptionModule
-      [ "xsession" "pointerCursor" "size" ]
-      [
-        "home"
-        "pointerCursor"
-        "size"
-      ]
-    )
-    (mkAliasOptionModule
-      [ "xsession" "pointerCursor" "defaultCursor" ]
-      [
-        "home"
-        "pointerCursor"
-        "x11"
-        "defaultCursor"
-      ]
-    )
-  ];
-
   options = {
     home.pointerCursor = mkOption {
-      type = types.nullOr pointerCursorModule;
-      default = null;
+      type = pointerCursorModule;
+      default = { };
       description = ''
         Cursor configuration.
 
@@ -168,7 +154,7 @@ in
         will enable x11 cursor configurations.
 
         Note that this will merely generate the cursor configurations.
-        To apply the configurations, the relevant subsytems must also be configured.
+        To apply the configurations, the relevant subsystems must also be configured.
         For example, [](#opt-home.pointerCursor.gtk.enable) will generate
         the gtk cursor configuration, but [](#opt-gtk.enable) needs
         to be set for it to be applied.
@@ -180,9 +166,10 @@ in
     let
       # Check if enable option was explicitly defined by the user
       enableDefined = any (x: x ? enable) opts.definitions;
+      pointerCursorDefined = opts.highestPrio != (lib.mkOptionDefault { }).priority;
 
       # Determine if cursor configuration should be enabled
-      enable = if enableDefined then cfg.enable else cfg != null;
+      enable = if enableDefined then cfg.enable else pointerCursorDefined;
     in
     mkMerge [
       (mkIf enable (mkMerge [
@@ -197,7 +184,7 @@ in
           ];
 
           home.sessionVariables = {
-            XCURSOR_SIZE = mkDefault cfg.size;
+            XCURSOR_SIZE = mkDefault cfg.x11.size;
             XCURSOR_THEME = mkDefault cfg.name;
           };
 
@@ -216,7 +203,7 @@ in
         (mkIf cfg.dotIcons.enable {
           # Add symlink of cursor icon directory to $HOME/.icons, needed for
           # backwards compatibility with some applications. See:
-          # https://specifications.freedesktop.org/icon-theme-spec/latest/ar01s03.html
+          # https://specifications.freedesktop.org/icon-theme/latest/#directory_layout
           home.file.".icons/default/index.theme".source =
             "${defaultIndexThemePackage}/share/icons/default/index.theme";
           home.file.".icons/${cfg.name}".source = "${cfg.package}/share/icons/${cfg.name}";
@@ -224,17 +211,20 @@ in
 
         (mkIf cfg.x11.enable {
           xsession.profileExtra = ''
-            ${pkgs.xorg.xsetroot}/bin/xsetroot -xcf ${cursorPath} ${toString cfg.size}
+            ${lib.getExe pkgs.xsetroot} -xcf ${cursorPath} ${toString cfg.x11.size}
           '';
 
           xresources.properties = {
             "Xcursor.theme" = cfg.name;
-            "Xcursor.size" = cfg.size;
+            "Xcursor.size" = cfg.x11.size;
           };
         })
 
         (mkIf cfg.gtk.enable {
-          gtk.cursorTheme = mkDefault { inherit (cfg) package name size; };
+          gtk.cursorTheme = mkDefault {
+            inherit (cfg) package name;
+            inherit (cfg.gtk) size;
+          };
         })
 
         (mkIf cfg.hyprcursor.enable {
@@ -249,7 +239,7 @@ in
             config = {
               seat = {
                 "*" = {
-                  xcursor_theme = "${cfg.name} ${toString cfg.size}";
+                  xcursor_theme = "${cfg.name} ${toString cfg.sway.size}";
                 };
               };
             };
@@ -258,39 +248,12 @@ in
       ]))
 
       {
-        warnings =
-          (optional
-            (any
-              (
-                x:
-                getAttrFromPath (
-                  [
-                    "xsession"
-                    "pointerCursor"
-                  ]
-                  ++ [ x ]
-                  ++ [ "isDefined" ]
-                ) options
-              )
-              [
-                "package"
-                "name"
-                "size"
-                "defaultCursor"
-              ]
-            )
-            ''
-              The option `xsession.pointerCursor` has been merged into `home.pointerCursor` and will be removed
-              in the future. Please change to set `home.pointerCursor` directly and enable `home.pointerCursor.x11.enable`
-              to generate x11 specific cursor configurations. You can refer to the documentation for more details.
-            ''
-          )
-          ++ (optional (opts.highestPrio != (lib.mkOptionDefault { }).priority && cfg == null) ''
-            Setting home.pointerCursor to null is deprecated.
-            Please update your configuration to explicitly set:
+        warnings = optional (pointerCursorDefined && !enableDefined) ''
+          Relying on `home.pointerCursor` to enable cursor config generation is deprecated.
+          Please update your configuration to explicitly set:
 
-              home.pointerCursor.enable = false;
-          '');
+            home.pointerCursor.enable = ${lib.boolToString enable};
+        '';
       }
     ];
 }

@@ -7,6 +7,19 @@
       binds = {
         "ctrl-d".command = "exit";
 
+        # Tests `name` field to specify multiple binds for the same key (`ctrl-d`) but different `mode`
+        "visual_ctrl-d" = {
+          name = "ctrl-d";
+          mode = "visual";
+          command = "exit";
+        };
+
+        # Allow arbitrary modes
+        "f" = {
+          mode = "something-non-default";
+          command = "exit";
+        };
+
         "ctrl-c" = {
           mode = "insert";
           command = [
@@ -29,7 +42,7 @@
     };
 
     # Needed to avoid error with dummy fish package.
-    xdg.dataFile."fish/home-manager_generated_completions".source = lib.mkForce (
+    xdg.dataFile."fish/home-manager/generated_completions".source = lib.mkForce (
       builtins.toFile "empty" ""
     );
 
@@ -48,6 +61,10 @@
           "bind -e --preset alt-s"
         assertFileContains home-files/.config/fish/functions/fish_user_key_bindings.fish \
           "bind --preset alt-s 'fish_commandline_prepend sudo"
+        assertFileContains home-files/.config/fish/functions/fish_user_key_bindings.fish \
+          "bind --mode visual ctrl-d exit"
+        assertFileContains home-files/.config/fish/functions/fish_user_key_bindings.fish \
+          "bind --mode something-non-default f exit"
       '';
     };
   };

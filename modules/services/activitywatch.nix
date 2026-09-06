@@ -1,6 +1,5 @@
 {
   config,
-  options,
   lib,
   pkgs,
   ...
@@ -12,7 +11,7 @@ let
   cfg = config.services.activitywatch;
 
   mkWatcherService =
-    name: cfg:
+    _name: cfg:
     let
       jobName = "activitywatch-watcher-${cfg.name}";
     in
@@ -46,7 +45,6 @@ let
     {
       name,
       config,
-      options,
       ...
     }:
     {
@@ -77,7 +75,7 @@ let
         };
 
         settings = mkOption {
-          type = watcherSettingsFormat.type;
+          inherit (watcherSettingsFormat) type;
           default = { };
           example = {
             timeout = 300;
@@ -122,7 +120,7 @@ let
     };
 
   generateWatchersConfig =
-    name: cfg:
+    _name: cfg:
     let
       # We're only assuming the generated filepath this since most watchers
       # uses the ActivityWatch client library which has `load_config_toml`
@@ -136,20 +134,17 @@ let
     );
 in
 {
-  meta.maintainers = with lib.maintainers; [ foo-dogsquared ];
+  meta.maintainers = [ ];
 
   options.services.activitywatch = {
     enable = lib.mkEnableOption "ActivityWatch, an automated time tracker";
 
-    package = mkOption {
-      description = ''
-        Package containing [the Rust implementation of ActivityWatch
-        server](https://github.com/ActivityWatch/aw-server-rust).
+    package = lib.mkPackageOption pkgs "activitywatch" {
+      example = "pkgs.aw-server-rust";
+      extraDescription = ''
+        Specifically, this should be a package containing [the Rust implementation
+        of ActivityWatch server](https://github.com/ActivityWatch/aw-server-rust).
       '';
-      type = lib.types.package;
-      default = pkgs.activitywatch;
-      defaultText = lib.literalExpression "pkgs.activitywatch";
-      example = lib.literalExpression "pkgs.aw-server-rust";
     };
 
     settings = mkOption {
@@ -157,7 +152,7 @@ in
         Configuration for `aw-server-rust` to be generated at
         {file}`$XDG_CONFIG_HOME/activitywatch/aw-server-rust/config.toml`.
       '';
-      type = watcherSettingsFormat.type;
+      inherit (watcherSettingsFormat) type;
       default = { };
       example = lib.literalExpression ''
         {

@@ -1,7 +1,17 @@
+{ config, ... }:
+
 {
   programs.claude-code = {
     enable = true;
-    package = null;
+    package = config.lib.test.mkStubPackage {
+      name = "claude-code";
+      version = "2.1.75";
+      buildScript = ''
+        mkdir -p $out/bin
+        touch $out/bin/claude
+        chmod 755 $out/bin/claude
+      '';
+    };
 
     mcpServers = {
       filesystem = {
@@ -13,12 +23,6 @@
           "/tmp"
         ];
       };
-    };
-
-    # assert fail: cannot set text and source at the same time.
-    memory = {
-      text = "Some text content";
-      source = ./expected-memory.md;
     };
 
     # assert fail: cannot set agents and agentsDir at the same time.
@@ -38,11 +42,11 @@
       test-hook = "test content";
     };
     hooksDir = ./hooks;
+
   };
 
   test.asserts.assertions.expected = [
-    "`programs.claude-code.package` cannot be null when `mcpServers` is configured"
-    "Cannot specify both `programs.claude-code.memory.text` and `programs.claude-code.memory.source`"
+    "Managed Claude Code MCP, LSP, and plugins require `programs.claude-code.package` version 2.1.76 or later"
     "Cannot specify both `programs.claude-code.agents` and `programs.claude-code.agentsDir`"
     "Cannot specify both `programs.claude-code.commands` and `programs.claude-code.commandsDir`"
     "Cannot specify both `programs.claude-code.hooks` and `programs.claude-code.hooksDir`"

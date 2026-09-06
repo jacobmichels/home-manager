@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  options,
   ...
 }:
 let
@@ -61,21 +62,37 @@ let
 
   renderDefaultProfiles = profiles: renderOptions { profile = lib.concatStringsSep "," profiles; };
 
+  wrapperRequiresOverride = lib.any (v: v != [ ]) [
+    cfg.scripts
+    cfg.extraMakeWrapperArgs
+  ];
+
   mpvPackage =
-    if cfg.scripts == [ ] then cfg.package else pkgs.mpv.override { inherit (cfg) scripts; };
+    if cfg.package == null then
+      null
+    else if wrapperRequiresOverride then
+      pkgs.mpv.override { inherit (cfg) scripts extraMakeWrapperArgs; }
+    else
+      cfg.package;
 
 in
 {
+  meta.maintainers = with lib.maintainers; [
+    chuangzhu
+  ];
+
   options = {
     programs.mpv = {
       enable = lib.mkEnableOption "mpv";
 
       package = lib.mkPackageOption pkgs "mpv" {
+        nullable = true;
+        extraDescription = "Set programs.mpv.package to null if package is already provided";
         example = "pkgs.mpv-unwrapped.wrapper { mpv = pkgs.mpv-unwrapped.override { vapoursynthSupport = true; }; youtubeSupport = true; }";
       };
 
       finalPackage = mkOption {
-        type = types.package;
+        type = types.nullOr types.package;
         readOnly = true;
         visible = false;
         description = ''
@@ -87,6 +104,22 @@ in
         type = with types; listOf package;
         default = [ ];
         example = literalExpression "[ pkgs.mpvScripts.mpris ]";
+        description = ''
+          List of scripts to use with mpv.
+        '';
+      };
+
+      extraMakeWrapperArgs = mkOption {
+        type = with types; listOf str;
+        default = [ ];
+        example = literalExpression ''
+          [
+            "--prefix"
+            "LD_LIBRARY_PATH"
+            ":"
+            (lib.makeLibraryPath [ pkgs.libaacs pkgs.libbluray ])
+          ]
+        '';
         description = ''
           List of scripts to use with mpv.
         '';
@@ -119,14 +152,12 @@ in
         '';
         type = mpvOptions;
         default = { };
-        example = literalExpression ''
-          {
-            profile = "gpu-hq";
-            force-window = true;
-            ytdl-format = "bestvideo+bestaudio";
-            cache-default = 4000000;
-          }
-        '';
+        example = {
+          profile = "gpu-hq";
+          force-window = true;
+          ytdl-format = "bestvideo+bestaudio";
+          cache-default = 4000000;
+        };
       };
 
       includes = mkOption {
@@ -134,11 +165,14 @@ in
         default = [ ];
         example = literalExpression ''
           [
-            "~/path/to/config.inc";
-            "~/path/to/conditional.inc";
+            "~/path/to/config.inc"
+            "~~/conditional.inc"
           ]
         '';
-        description = "List of configuration files to include at the end of mpv.conf.";
+        description = ''
+          List of configuration files to include at the end of mpv.conf.
+          Mpv accepts several useful [prefixes](https://mpv.io/manual/stable/#paths).
+        '';
       };
 
       profiles = mkOption {
@@ -181,13 +215,11 @@ in
         '';
         type = mpvBindings;
         default = { };
-        example = literalExpression ''
-          {
-            WHEEL_UP = "seek 10";
-            WHEEL_DOWN = "seek -10";
-            "Alt+0" = "set window-scale 0.5";
-          }
-        '';
+        example = {
+          WHEEL_UP = "seek 10";
+          WHEEL_DOWN = "seek -10";
+          "Alt+0" = "set window-scale 0.5";
+        };
       };
 
       extraInput = mkOption {
@@ -211,13 +243,17 @@ in
       {
         assertions = [
           {
-            assertion = (cfg.scripts == [ ]) || (cfg.package == pkgs.mpv);
-            message = ''The programs.mpv "package" option is mutually exclusive with "scripts" option.'';
+            assertion = wrapperRequiresOverride -> (cfg.package == options.programs.mpv.package.default);
+            message = ''The programs.mpv "package" option is mutually exclusive with "scripts", "extraMakeWrapperArgs" options.'';
+          }
+          {
+            assertion = wrapperRequiresOverride -> (cfg.package != null);
+            message = ''The programs.mpv "package" option set to null is mutually exclusive with "scripts", "extraMakeWrapperArgs" options.'';
           }
         ];
       }
       {
-        home.packages = [ mpvPackage ];
+        home.packages = lib.optionals (cfg.package != null) [ config.programs.mpv.finalPackage ];
         programs.mpv.finalPackage = mpvPackage;
       }
 
@@ -250,9 +286,4 @@ in
       }
     ]
   );
-
-  meta.maintainers = with lib.maintainers; [
-    thiagokokada
-    chuangzhu
-  ];
 }

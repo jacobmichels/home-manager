@@ -41,7 +41,7 @@ let
       description = "pair of ${x.description}";
     };
 
-  mkDefaultAttrs = mapAttrs (n: v: mkDefault v);
+  mkDefaultAttrs = mapAttrs (_n: mkDefault);
 
   # Basically a tinkered lib.generators.mkKeyValueDefault
   # It either serializes a top-level definition "key: { values };"
@@ -77,12 +77,17 @@ let
         ${v}
       '';
 
-  toConf = attrs: concatStringsSep "\n" (mkAttrsString true cfg.settings);
+  toConf = attrs: concatStringsSep "\n" (mkAttrsString true attrs);
 
-  configFile = toConf cfg.settings;
+  configFile = concatStringsSep "\n" [
+    (toConf cfg.settings)
+    cfg.extraConfig
+  ];
 
 in
 {
+  meta.maintainers = with lib.maintainers; [ thiagokokada ];
+
   imports = [
     (mkRemovedOptionModule [
       "services"
@@ -289,7 +294,7 @@ in
     extraArgs = mkOption {
       type = with types; listOf str;
       default = [ ];
-      example = literalExpression ''[ "--legacy-backends" ]'';
+      example = [ "--legacy-backends" ];
       description = ''
         Extra arguments to be passed to the picom executable.
       '';
@@ -347,6 +352,24 @@ in
           CONFIGURATION FILES section at `picom(1)`.
         '';
       };
+
+    extraConfig = mkOption {
+      type = types.lines;
+      default = "";
+      example = ''
+        animations = (
+          {
+          	triggers = [ "open", "show" ];
+          	preset = "slide-in";
+          	direction = "up";
+            duration = 0.2;
+          }
+        )
+      '';
+      description = ''
+        Extra configuration lines to append to the picom configuration file.
+      '';
+    };
   };
 
   config = mkIf cfg.enable {
@@ -363,7 +386,7 @@ in
       fade-exclude = cfg.fadeExclude;
 
       # shadows
-      shadow = cfg.shadow;
+      inherit (cfg) shadow;
       shadow-offset-x = elemAt cfg.shadowOffsets 0;
       shadow-offset-y = elemAt cfg.shadowOffsets 1;
       shadow-opacity = cfg.shadowOpacity;
@@ -372,13 +395,10 @@ in
       # opacity
       active-opacity = cfg.activeOpacity;
       inactive-opacity = cfg.inactiveOpacity;
-
-      wintypes = cfg.wintypes;
-
       opacity-rule = cfg.opacityRules;
 
       # other options
-      backend = cfg.backend;
+      inherit (cfg) backend wintypes;
       vsync = cfg.vSync;
     };
 
@@ -410,6 +430,4 @@ in
       };
     };
   };
-
-  meta.maintainers = with lib.maintainers; [ thiagokokada ];
 }

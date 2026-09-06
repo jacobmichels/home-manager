@@ -15,14 +15,14 @@
   _module.args.pkgs = lib.mkForce realPkgs;
 
   # Needed to avoid error with dummy fish package.
-  xdg.dataFile."fish/home-manager_generated_completions".source = lib.mkForce (
+  xdg.dataFile."fish/home-manager/generated_completions".source = lib.mkForce (
     builtins.toFile "empty" ""
   );
 
   nmt.script =
     let
       configDir =
-        if pkgs.stdenv.isDarwin && !config.xdg.enable then
+        if pkgs.stdenv.hostPlatform.isDarwin && !config.xdg.enable then
           "home-files/Library/Application Support/nushell"
         else
           "home-files/.config/nushell";

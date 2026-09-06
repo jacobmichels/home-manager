@@ -6,7 +6,6 @@
 }:
 let
   inherit (lib)
-    literalExpression
     mkOption
     optional
     types
@@ -26,7 +25,7 @@ in
       host = mkOption {
         type = with types; nullOr str;
         default = null;
-        example = literalExpression "tmate.io";
+        example = "tmate.io";
         description = "Tmate server address.";
       };
 
@@ -40,14 +39,14 @@ in
       dsaFingerprint = mkOption {
         type = with types; nullOr str;
         default = null;
-        example = literalExpression "SHA256:1111111111111111111111111111111111111111111";
+        example = "SHA256:1111111111111111111111111111111111111111111";
         description = "Tmate server EdDSA key fingerprint.";
       };
 
       rsaFingerprint = mkOption {
         type = with types; nullOr str;
         default = null;
-        example = literalExpression "SHA256:1111111111111111111111111111111111111111111";
+        example = "SHA256:1111111111111111111111111111111111111111111";
         description = "Tmate server RSA key fingerprint.";
       };
 
@@ -69,7 +68,7 @@ in
       let
         conf =
           optional (cfg.host != null) ''set -g tmate-server-host "${cfg.host}"''
-          ++ optional (cfg.port != null) "set -g tmate-server-port ${builtins.toString cfg.port}"
+          ++ optional (cfg.port != null) "set -g tmate-server-port ${toString cfg.port}"
           ++ optional (
             cfg.dsaFingerprint != null
           ) ''set -g tmate-server-ed25519-fingerprint "${cfg.dsaFingerprint}"''

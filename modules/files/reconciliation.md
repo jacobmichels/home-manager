@@ -17,9 +17,9 @@ force-resolution command in this prototype.
 
 ## Architecture
 
-This prototype targets checkout c53e65ec (2025-10-14). Current upstream has
-additional overlap handling and a batched linker; porting this change requires
-applying the skip to its classification loop as well.
+This prototype includes upstream 2c0350c759688177331b8f5242311fae8877bdb3,
+matching Strata's Home Manager input before the local override. Reconciled
+targets are skipped in the batched linker's classification loop.
 
 * `modules/lib/file-type.nix` defines the generic file submodule, including
   `source`, `text`, `target`, `executable`, `recursive`, `onChange`, and `force`.

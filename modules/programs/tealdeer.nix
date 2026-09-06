@@ -9,20 +9,22 @@ let
 
   cfg = config.programs.tealdeer;
 
-  configDir = if pkgs.stdenv.isDarwin then "Library/Application Support" else config.xdg.configHome;
+  configDir =
+    if pkgs.stdenv.hostPlatform.isDarwin then "Library/Application Support" else config.xdg.configHome;
 
   tomlFormat = pkgs.formats.toml { };
 
   settingsFormat =
     let
       updatesSection = types.submodule {
+        freeformType = tomlFormat.type;
         options = {
           auto_update = lib.mkEnableOption "auto-update";
 
           auto_update_interval_hours = mkOption {
             type = types.ints.positive;
             default = 720;
-            example = lib.literalExpression "24";
+            example = 24;
             description = ''
               Duration, since the last cache update, after which the cache will be refreshed.
               This parameter is ignored if {var}`auto_update` is set to `false`.
@@ -103,7 +105,7 @@ in
 
     services.tldr-update = mkIf cfg.enableAutoUpdates {
       enable = true;
-      package = cfg.package;
+      inherit (cfg) package;
     };
   };
 }

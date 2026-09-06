@@ -49,16 +49,14 @@ in
       settings = lib.mkOption {
         inherit (keyValue) type;
         default = { };
-        example = lib.literalExpression ''
-          {
-            theme = "catppuccin-mocha";
-            font-size = 10;
-            keybind = [
-              "ctrl+h=goto_split:left"
-              "ctrl+l=goto_split:right"
-            ];
-          }
-        '';
+        example = {
+          theme = "catppuccin-mocha";
+          font-size = 10;
+          keybind = [
+            "ctrl+h=goto_split:left"
+            "ctrl+l=goto_split:right"
+          ];
+        };
         description = ''
           Configuration written to {file}`$XDG_CONFIG_HOME/ghostty/config`.
 
@@ -112,6 +110,24 @@ in
       installBatSyntax = lib.mkEnableOption "installation of Ghostty configuration syntax for bat" // {
         default = cfg.package != null;
         defaultText = lib.literalMD "`true` if programs.ghostty.package is not null";
+      };
+
+      systemd = lib.mkOption {
+        type = lib.types.submodule {
+          options = {
+            enable = lib.mkEnableOption "the Ghostty systemd user service" // {
+              default = pkgs.stdenv.hostPlatform.isLinux;
+              defaultText = lib.literalMD "`true` on Linux, `false` otherwise";
+            };
+          };
+        };
+        default = { };
+        description = ''
+          Configuration for Ghostty's systemd integration.
+          This enables additional speed and features.
+
+          See <https://ghostty.org/docs/linux/systemd> for more information.
+        '';
       };
 
       enableBashIntegration = mkShellIntegrationOption (
@@ -195,11 +211,43 @@ in
         };
       })
 
+      (lib.mkIf cfg.systemd.enable {
+        assertions = [
+          {
+            assertion = cfg.systemd.enable -> cfg.package != null;
+            message = "programs.ghostty.systemd.enable cannot be true when programs.ghostty.package is null";
+          }
+          {
+            assertion = cfg.systemd.enable -> pkgs.stdenv.hostPlatform.isLinux;
+            message = "Ghostty systemd integration cannot be enabled for non-linux platforms";
+          }
+        ];
+
+        xdg.configFile."systemd/user/app-com.mitchellh.ghostty.service".source =
+          "${cfg.package}/share/systemd/user/app-com.mitchellh.ghostty.service";
+
+        xdg.configFile."systemd/user/app-com.mitchellh.ghostty.service.d/overrides.conf".text = ''
+          [Unit]
+          X-SwitchMethod=keep-old
+          X-Reload-Triggers=${
+            let
+              storePathOf = name: config.xdg.configFile.${name}.source;
+            in
+            toString (
+              lib.optionals (cfg.settings != { }) [ (storePathOf "ghostty/config") ]
+              ++ lib.mapAttrsToList (name: _: storePathOf "ghostty/themes/${name}") cfg.themes
+            )
+          }
+        '';
+
+        dbus.packages = [ cfg.package ];
+      })
+
       (lib.mkIf cfg.enableBashIntegration {
         # Make order 101 to be placed exactly after bash completions, as Ghostty
         # documentation suggests sourcing the script as soon as possible
         programs.bash.initExtra = lib.mkOrder 101 ''
-          if [[ -n "''${GHOSTTY_RESOURCES_DIR}" ]]; then
+          if [[ -r "''${GHOSTTY_RESOURCES_DIR}/shell-integration/bash/ghostty.bash" ]]; then
             builtin source "''${GHOSTTY_RESOURCES_DIR}/shell-integration/bash/ghostty.bash"
           fi
         '';
@@ -207,7 +255,7 @@ in
 
       (lib.mkIf cfg.enableFishIntegration {
         programs.fish.interactiveShellInit = ''
-          if set -q GHOSTTY_RESOURCES_DIR
+          if test -r "$GHOSTTY_RESOURCES_DIR/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish"
             source "$GHOSTTY_RESOURCES_DIR/shell-integration/fish/vendor_conf.d/ghostty-shell-integration.fish"
           end
         '';
@@ -215,7 +263,7 @@ in
 
       (lib.mkIf cfg.enableZshIntegration {
         programs.zsh.initContent = ''
-          if [[ -n $GHOSTTY_RESOURCES_DIR ]]; then
+          if [[ -r "$GHOSTTY_RESOURCES_DIR"/shell-integration/zsh/ghostty-integration ]]; then
             source "$GHOSTTY_RESOURCES_DIR"/shell-integration/zsh/ghostty-integration
           fi
         '';

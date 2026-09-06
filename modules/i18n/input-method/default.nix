@@ -45,6 +45,10 @@ let
       '';
 in
 {
+  meta.maintainers = with lib.maintainers; [
+    kranzes
+  ];
+
   imports = [
     ./fcitx5.nix
     ./hime.nix
@@ -132,9 +136,4 @@ in
       gtk3Cache
     ];
   };
-
-  meta.maintainers = with lib.maintainers; [
-    awwpotato
-    kranzes
-  ];
 }

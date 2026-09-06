@@ -17,7 +17,7 @@ let
     mkOption
     types
     ;
-  mergeSets = sets: lists.fold attrsets.recursiveUpdate { } sets;
+  mergeSets = sets: lists.foldr attrsets.recursiveUpdate { } sets;
   cfg = config.services.way-displays;
   yaml = pkgs.formats.yaml { };
 in
@@ -88,7 +88,7 @@ in
 
     home.packages = [ cfg.package ];
 
-    wayland.windowManager = lib.mapAttrs (name: _: {
+    wayland.windowManager = lib.mapAttrs (_name: _: {
       systemd.variables = lib.mkOptionDefault [ "XDG_VTNR" ];
     }) options.wayland.windowManager;
 

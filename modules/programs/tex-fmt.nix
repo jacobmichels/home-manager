@@ -11,10 +11,10 @@ let
     mkEnableOption
     mkPackageOption
     mkOption
-    literalExpression
     ;
 
-  configDir = if pkgs.stdenv.isDarwin then "Library/Application Support" else config.xdg.configHome;
+  configDir =
+    if pkgs.stdenv.hostPlatform.isDarwin then "Library/Application Support" else config.xdg.configHome;
 
   tomlFormat = pkgs.formats.toml { };
   cfg = config.programs.tex-fmt;
@@ -32,16 +32,14 @@ in
     package = mkPackageOption pkgs "tex-fmt" { nullable = true; };
 
     settings = mkOption {
-      type = tomlFormat.type;
+      inherit (tomlFormat) type;
       default = { };
-      example = literalExpression ''
-        {
-          wrap = true;
-          tabsize = 2;
-          tabchar = "space";
-          lists = [];
-        }
-      '';
+      example = {
+        wrap = true;
+        tabsize = 2;
+        tabchar = "space";
+        lists = [ ];
+      };
       description = ''
         Configuration written to
         {file}`$XDG_CONFIG_HOME/tex-fmt/tex-fmt.toml` on Linux or

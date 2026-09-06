@@ -39,14 +39,14 @@ in
       nmt.script =
         let
           binPath =
-            if pkgs.hostPlatform.isDarwin then
+            if pkgs.stdenv.hostPlatform.isDarwin then
               "Applications/${cfg.darwinAppName}.app/Contents/MacOS"
             else
               "bin";
         in
         ''
           assertFileRegex \
-            "home-path/${binPath}/${cfg.wrappedPackageName}" \
+            "home-path/${binPath}/${cfg.finalPackage.meta.mainProgram}" \
             MOZ_APP_LAUNCHER
 
           assertDirectoryExists "home-files/${cfg.profilesPath}/basic"

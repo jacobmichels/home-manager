@@ -43,30 +43,41 @@ in
         should be written as lists. Variables' and colors' names should be
         quoted. See <https://wiki.hypr.land/Hypr-Ecosystem/hyprpaper/> for more examples.
       '';
-      example = lib.literalExpression ''
-        {
-          ipc = "on";
-          splash = false;
-          splash_offset = 2.0;
+      example = {
+        splash = false;
 
-          preload =
-            [ "/share/wallpapers/buttons.png" "/share/wallpapers/cat_pacman.png" ];
-
-          wallpaper = [
-            "DP-3,/share/wallpapers/buttons.png"
-            "DP-1,/share/wallpapers/cat_pacman.png"
-          ];
-        }
-      '';
+        wallpaper = [
+          {
+            monitor = "DP-3";
+            path = "/share/wallpapers/buttons.png";
+            fit_mode = "tile";
+          }
+          {
+            monitor = "DP-1";
+            path = "/share/wallpapers/cat_pacman.png";
+          }
+        ];
+      };
     };
 
     importantPrefixes = lib.mkOption {
       type = with lib.types; listOf str;
-      default = [ "$" ];
+      default = [
+        "$"
+        "monitor"
+      ];
       example = [ "$" ];
       description = ''
         List of prefix of attributes to source at the top of the config.
       '';
+    };
+
+    systemdTarget = lib.mkOption {
+      type = lib.types.str;
+      default = config.wayland.systemd.target;
+      defaultText = lib.literalExpression "config.wayland.systemd.target";
+      example = "hyprland-session.target";
+      description = "Systemd target to bind to.";
     };
   };
 
@@ -80,14 +91,14 @@ in
 
     systemd.user.services.hyprpaper = lib.mkIf (cfg.package != null) {
       Install = {
-        WantedBy = [ config.wayland.systemd.target ];
+        WantedBy = [ cfg.systemdTarget ];
       };
 
       Unit = {
         ConditionEnvironment = "WAYLAND_DISPLAY";
         Description = "hyprpaper";
-        After = [ config.wayland.systemd.target ];
-        PartOf = [ config.wayland.systemd.target ];
+        After = [ cfg.systemdTarget ];
+        PartOf = [ cfg.systemdTarget ];
         X-Restart-Triggers = lib.mkIf (cfg.settings != { }) [
           "${config.xdg.configFile."hypr/hyprpaper.conf".source}"
         ];

@@ -35,7 +35,8 @@ let
     filterAttrs (_: v: v != null) (
       (getAttrs [ "type" "fileExt" "encoding" ] a.local)
       // {
-        path = a.local.path;
+        inherit (a.local) path;
+        readOnly = a.vdirsyncer.localReadOnly;
         postHook =
           if a.vdirsyncer.postHook != null then
             (pkgs.writeShellScriptBin "post-hook" a.vdirsyncer.postHook + "/bin/post-hook")
@@ -75,9 +76,9 @@ let
       getAttrs [ "collections" "conflictResolution" "metadata" "partialSync" ] a.vdirsyncer
     );
 
-  pairs = mapAttrs (_: v: pair v) vdirsyncerAccounts;
-  localStorages = mapAttrs (_: v: localStorage v) vdirsyncerAccounts;
-  remoteStorages = mapAttrs (_: v: remoteStorage v) vdirsyncerAccounts;
+  pairs = mapAttrs (_: pair) vdirsyncerAccounts;
+  localStorages = mapAttrs (_: localStorage) vdirsyncerAccounts;
+  remoteStorages = mapAttrs (_: remoteStorage) vdirsyncerAccounts;
 
   optionString =
     n: v:
@@ -89,6 +90,8 @@ let
       ''fileext = "${v}"''
     else if (n == "encoding") then
       ''encoding = "${v}"''
+    else if (n == "readOnly") then
+      "read_only = ${lib.boolToString v}"
     else if (n == "postHook") then
       ''post_hook = "${v}"''
     else if (n == "url") then
@@ -101,6 +104,8 @@ let
         end_date = "${v.end}"''
     else if (n == "itemTypes") then
       "item_types = ${listString (map wrap v)}"
+    else if (n == "useVcard4") then
+      "use_vcard_4 = ${v}"
     else if (n == "userName") then
       ''username = "${v}"''
     else if (n == "userNameCommand") then
@@ -273,9 +278,13 @@ in
               "fileExt"
               "encoding"
               "postHook"
+              "readOnly"
             ]
           else if (t == "singlefile") then
-            [ "encoding" ]
+            [
+              "encoding"
+              "readOnly"
+            ]
           else if (t == "google_calendar") then
             [
               "timeRange"
@@ -298,7 +307,7 @@ in
           in
           mapAttrsToList
             (
-              a: v':
+              a: _v':
               [
                 {
                   assertion = (lib.elem a allowed);
@@ -325,7 +334,7 @@ in
               ++ map (
                 attrs:
                 let
-                  defined = lib.attrNames (filterAttrs (n: v: v != null) (lib.genAttrs attrs (a: v.${a} or null)));
+                  defined = lib.attrNames (filterAttrs (_n: v: v != null) (lib.genAttrs attrs (a: v.${a} or null)));
                 in
                 {
                   assertion = lib.length defined <= 1;

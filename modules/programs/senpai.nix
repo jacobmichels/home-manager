@@ -8,11 +8,18 @@ let
   inherit (lib) mkOption types;
 
   cfg = config.programs.senpai;
+
+  configDir =
+    if pkgs.stdenv.hostPlatform.isDarwin then "Library/Application Support" else config.xdg.configHome;
+
 in
 {
+  meta.maintainers = [ lib.maintainers.malte-v ];
+
   options.programs.senpai = {
     enable = lib.mkEnableOption "senpai";
     package = lib.mkPackageOption pkgs "senpai" { };
+
     config = mkOption {
       type = types.submodule {
         freeformType = types.attrsOf types.anything;
@@ -26,7 +33,7 @@ in
 
               UR`ircs://`, `irc://`, and `irc+insecure://` URLs are supported,
               in which case only the hostname and port parts will be used. If
-              the scheme is `ircs/irc+insecure`, tls will be overriden and set
+              the scheme is `ircs/irc+insecure`, tls will be overridden and set
               to true/false accordingly.
             '';
           };
@@ -69,13 +76,11 @@ in
           };
         };
       };
-      example = lib.literalExpression ''
-        {
-          address = "libera.chat:6697";
-          nickname = "nicholas";
-          password = "verysecurepassword";
-        }
-      '';
+      example = {
+        address = "libera.chat:6697";
+        nickname = "nicholas";
+        password = "verysecurepassword";
+      };
       description = ''
         Configuration for senpai. For a complete list of options, see
         {manpage}`senpai(5)`.
@@ -102,9 +107,28 @@ in
         message = "senpai: no-tls is deprecated, use tls instead";
       }
     ];
-    home.packages = [ cfg.package ];
-    xdg.configFile."senpai/senpai.scfg".text = lib.hm.generators.toSCFG { } cfg.config;
-  };
 
-  meta.maintainers = [ lib.maintainers.malte-v ];
+    home.packages = [ cfg.package ];
+
+    home.file."${configDir}/senpai/senpai.scfg".text =
+      let
+        attrsToDirectiveList = lib.mapAttrsToList (
+          name: value:
+          {
+            inherit name;
+          }
+          // (
+            if builtins.typeOf value != "set" then
+              { params = lib.toList value; }
+            else
+              let
+                children = lib.filterAttrs (n: _: n != "_params") value;
+              in
+              lib.optionalAttrs (value ? "_params") { params = value._params; }
+              // lib.optionalAttrs (children != { }) { children = attrsToDirectiveList children; }
+          )
+        );
+      in
+      lib.hm.generators.toSCFG { } (attrsToDirectiveList cfg.config);
+  };
 }

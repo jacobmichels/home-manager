@@ -18,21 +18,19 @@ in
     package = lib.mkPackageOption pkgs "bun" { nullable = true; };
 
     settings = lib.mkOption {
-      type = tomlFormat.type;
+      inherit (tomlFormat) type;
       default = { };
-      example = lib.literalExpression ''
-        {
-          smol = true;
-          telemetry = false;
-          test = {
-            coverage = true;
-            coverageThreshold = 0.9;
-          };
-          install.lockfile = {
-            print = "yarn";
-          };
-        }
-      '';
+      example = {
+        smol = true;
+        telemetry = false;
+        test = {
+          coverage = true;
+          coverageThreshold = 0.9;
+        };
+        install.lockfile = {
+          print = "yarn";
+        };
+      };
       description = ''
         Configuration written to
         {file}`$XDG_CONFIG_HOME/.bunfig.toml`.
@@ -64,7 +62,7 @@ in
     programs.git.attributes = lib.mkIf (cfg.enableGitIntegration && (cfg.package != null)) [
       "*.lockb binary diff=lockb"
     ];
-    programs.git.extraConfig.diff.lockb = lib.mkIf (cfg.enableGitIntegration && (cfg.package != null)) {
+    programs.git.settings.diff.lockb = lib.mkIf (cfg.enableGitIntegration && (cfg.package != null)) {
       textconv = lib.getExe cfg.package;
       binary = true;
     };

@@ -11,7 +11,11 @@ let
 
   yamlFormat = pkgs.formats.yaml { };
 
-  inherit (pkgs.stdenv.hostPlatform) isDarwin;
+  configDir =
+    if pkgs.stdenv.hostPlatform.isDarwin && !config.xdg.enable then
+      "Library/Application Support/jesseduffield"
+    else
+      config.xdg.configHome;
 
 in
 {
@@ -23,19 +27,20 @@ in
     package = lib.mkPackageOption pkgs "lazydocker" { nullable = true; };
 
     settings = lib.mkOption {
-      type = yamlFormat.type;
+      inherit (yamlFormat) type;
       default = {
         commandTemplates.dockerCompose = "docker compose"; # Lazydocker uses docker-compose by default which will not work
       };
-      example = lib.literalExpression ''
-        {
-          gui.theme = {
-            activeBorderColor = ["red" "bold"];
-            inactiveBorderColor = ["blue"];
-          };
-          commandTemplates.dockerCompose = "docker compose compose -f docker-compose.yml";
-        }
-      '';
+      example = {
+        gui.theme = {
+          activeBorderColor = [
+            "red"
+            "bold"
+          ];
+          inactiveBorderColor = [ "blue" ];
+        };
+        commandTemplates.dockerCompose = "docker compose compose -f docker-compose.yml";
+      };
       description = ''
         Configuration written to
         {file}`$XDG_CONFIG_HOME/lazydocker/config.yml`
@@ -51,16 +56,8 @@ in
   config = lib.mkIf cfg.enable {
     home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
 
-    home.file."Library/Application Support/jesseduffield/lazydocker/config.yml" =
-      lib.mkIf (cfg.settings != { } && (isDarwin && !config.xdg.enable))
-        {
-          source = yamlFormat.generate "lazydocker-config" cfg.settings;
-        };
-
-    xdg.configFile."lazydocker/config.yml" =
-      lib.mkIf (cfg.settings != { } && !(isDarwin && !config.xdg.enable))
-        {
-          source = yamlFormat.generate "lazydocker-config" cfg.settings;
-        };
+    home.file."${configDir}/lazydocker/config.yml" = lib.mkIf (cfg.settings != { }) {
+      source = yamlFormat.generate "lazydocker-config" cfg.settings;
+    };
   };
 }

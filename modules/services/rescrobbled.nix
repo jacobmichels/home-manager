@@ -9,7 +9,7 @@ let
   cfg = config.services.rescrobbled;
 in
 {
-  meta.maintainers = [ lib.maintainers.awwpotato ];
+  meta.maintainers = [ lib.maintainers.da157 ];
 
   options.services.rescrobbled = {
     enable = lib.mkEnableOption "rescrobbled, a MPRIS music scrobbler daemon";
@@ -56,8 +56,6 @@ in
       Unit = {
         Description = "An MPRIS scrobbler";
         Documentation = "https://github.com/InputUsername/rescrobbled";
-        Wants = [ "network-online.target" ];
-        After = [ "network-online.target" ];
       };
 
       Service.ExecStart = lib.getExe cfg.package;

@@ -16,7 +16,7 @@ let
   mkUlidAssertions =
     path:
     lib.concatMap (
-      { name, value }:
+      { name, ... }:
       let
         length = 26;
         allowed = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -41,7 +41,10 @@ let
     ) (lib.attrsToList (lib.attrByPath path null cfg));
 in
 {
-  meta.maintainers = [ lib.maintainers.bricked ];
+  meta.maintainers = [
+    lib.maintainers.bricked
+    lib.maintainers.ilovelinux
+  ];
 
   options.programs.firefoxpwa = {
     enable = lib.mkEnableOption "Progressive Web Apps for Firefox";
@@ -49,7 +52,7 @@ in
     package = lib.mkPackageOption pkgs "firefoxpwa" { nullable = true; };
 
     settings = lib.mkOption {
-      type = jsonFmt.type;
+      inherit (jsonFmt) type;
       default = { };
       description = ''
         Settings to be written to the configuration file. See
@@ -119,8 +122,9 @@ in
                           example = "https://developer.mozilla.org/";
                         };
                         manifestUrl = lib.mkOption {
-                          type = lib.types.str;
-                          description = "URL of the site's web app manifest.";
+                          type = with lib.types; nullOr str;
+                          default = null;
+                          description = "URL of the site's web app manifest. Omit or set to `null` when installing a non-PWA website.";
                           example = "https://developer.mozilla.org/manifest.f42880861b394dd4dc9b.json";
                         };
                         desktopEntry = {
@@ -147,7 +151,7 @@ in
                           };
                         };
                         settings = lib.mkOption {
-                          type = jsonFmt.type;
+                          inherit (jsonFmt) type;
                           default = { };
                           description = ''
                             Settings for this site. See
@@ -165,13 +169,20 @@ in
                         settings = {
                           ulid = name;
                           profile = profile.name;
-                          config = {
-                            name = config.name;
-                            document_url = config.url;
-                            manifest_url = config.manifestUrl;
-                          };
+                          config =
+                            let
+                              # A data url with an empty base64-encoded JSON object.
+                              # This is usually used for non-PWA websites.
+                              # See: https://github.com/nix-community/home-manager/issues/9818
+                              empty_manifest_url = "data:application/manifest+json;base64,e30=";
+                            in
+                            {
+                              inherit (config) name;
+                              document_url = config.url;
+                              manifest_url = lib.defaultTo empty_manifest_url config.manifestUrl;
+                            };
                           manifest = {
-                            name = config.name;
+                            inherit (config) name;
                             start_url = config.url;
                           };
                         };
@@ -181,7 +192,7 @@ in
                 );
               };
               settings = lib.mkOption {
-                type = jsonFmt.type;
+                inherit (jsonFmt) type;
                 default = { };
                 description = ''
                   Settings for this profile. See
@@ -193,7 +204,7 @@ in
 
             config.settings = {
               ulid = name;
-              name = config.name;
+              inherit (config) name;
               sites = builtins.attrNames config.sites;
             };
           }
@@ -239,7 +250,7 @@ in
       lib.mapAttrsToList (name: site: {
         "FFPWA-${name}" = lib.mkIf site.desktopEntry.enable {
           inherit (site.desktopEntry) icon categories;
-          name = site.settings.manifest.name;
+          inherit (site.settings.manifest) name;
           exec = "firefoxpwa site launch ${name} --protocol %u";
           terminal = false;
         };

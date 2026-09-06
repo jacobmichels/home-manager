@@ -17,13 +17,18 @@ let
     mkBashIntegrationOption
     mkZshIntegrationOption
     mkFishIntegrationOption
+    mkNushellIntegrationOption
     ;
+
+  inherit (lib.hm.nushell) mkNushellInline;
 
   cfg = config.programs.vivid;
   yamlFormat = pkgs.formats.yaml { };
 in
 {
-  meta.maintainers = with lib.hm.maintainers; [ aguirre-matteo ];
+  meta.maintainers = [
+    lib.maintainers.arunoruto
+  ];
 
   options.programs.vivid = {
     enable = mkEnableOption "vivid";
@@ -32,9 +37,17 @@ in
     enableBashIntegration = mkBashIntegrationOption { inherit config; };
     enableZshIntegration = mkZshIntegrationOption { inherit config; };
     enableFishIntegration = mkFishIntegrationOption { inherit config; };
+    enableNushellIntegration = mkNushellIntegrationOption { inherit config; };
 
     colorMode = mkOption {
-      type = with types; nullOr str;
+      type =
+        with types;
+        nullOr (
+          either str (enum [
+            "8-bit"
+            "24-bit"
+          ])
+        );
       default = null;
       example = "8-bit";
       description = ''
@@ -135,7 +148,7 @@ in
       // (lib.mapAttrs' (
         name: value:
         lib.nameValuePair "vivid/themes/${name}.yml" {
-          source = if lib.isAttrs value then yamlFormat.generate "${name}.yml" value else value;
+          source = if lib.isAttrs value then pkgs.writeText "${name}.json" (builtins.toJSON value) else value;
         }
       ) cfg.themes);
 
@@ -150,5 +163,9 @@ in
       programs.fish.interactiveShellInit = mkIf cfg.enableFishIntegration ''
         set -gx LS_COLORS "$(${vividCommand})"
       '';
+
+      programs.nushell.environmentVariables = mkIf cfg.enableNushellIntegration {
+        LS_COLORS = mkNushellInline vividCommand;
+      };
     };
 }

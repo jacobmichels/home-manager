@@ -1,4 +1,9 @@
-{ config, lib, ... }:
+{
+  config,
+  lib,
+  options,
+  ...
+}:
 {
   config = {
     programs.ssh = {
@@ -34,10 +39,16 @@
               host.address = "/run/user/1000/gnupg/S.gpg-agent";
             }
           ];
+          kexAlgorithms = [
+            "sntrup761x25519-sha512"
+            "sntrup761x25519-sha512@openssh.com"
+            "mlkem768x25519-sha256"
+          ];
           dynamicForwards = [ { port = 2839; } ];
           setEnv = {
             FOO = "foo12";
             BAR = "_bar_ 42";
+            BAZ = ''with " some \ very \" fun \\ escapes'';
           };
         };
 
@@ -54,6 +65,12 @@
     home.file.assertions.text = builtins.toJSON (
       map (a: a.message) (lib.filter (a: !a.assertion) config.assertions)
     );
+
+    test.asserts.warnings.expected = [
+      ''
+        `programs.ssh.matchBlocks` defined in ${lib.showFiles options.programs.ssh.matchBlocks.files} is deprecated. Use `programs.ssh.settings`.
+      ''
+    ];
 
     nmt.script = ''
       assertFileExists home-files/.ssh/config

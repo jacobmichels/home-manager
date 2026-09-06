@@ -46,16 +46,29 @@ let
       filename = "${name}.${style}";
       pathSafeName = mkPathSafeName filename;
 
-      # Needed because systemd derives unit names from the ultimate
-      # link target.
+      # The actual unit content after filtering.
+      finalUnit =
+        let
+          # Filters out fields that are set to `null` or empty list.
+          shouldKeepField =
+            _section: _key: value:
+            value != null && value != [ ];
+
+          # Filters out empty sections.
+          shouldKeepSection = _: value: value != { };
+
+          inherit (lib) mapAttrs filterAttrs;
+
+          filteredFields = mapAttrs (section: filterAttrs (shouldKeepField section)) serviceCfg;
+          filteredSections = filterAttrs shouldKeepSection filteredFields;
+        in
+        filteredSections;
+
+      # Needed because systemd derives unit names from the ultimate link target.
       source =
         pkgs.writeTextFile {
           name = pathSafeName;
-          text = toSystemdIni (
-            lib.filterAttrs (_: v: v != { }) (
-              lib.mapAttrs (_: lib.filterAttrs (_: v: v != null && v != [ ])) serviceCfg
-            )
-          );
+          text = toSystemdIni finalUnit;
           destination = "/${filename}";
         }
         + "/${filename}";
@@ -75,7 +88,7 @@ let
   buildServices =
     style: serviceCfgs: lib.concatLists (lib.mapAttrsToList (buildService style) serviceCfgs);
 
-  servicesStartTimeoutMs = builtins.toString cfg.servicesStartTimeoutMs;
+  servicesStartTimeoutMs = toString cfg.servicesStartTimeoutMs;
 
   unitBaseType =
     unitKind: mod:
@@ -234,8 +247,8 @@ in
   options = {
     systemd.user = {
       enable = mkEnableOption "the user systemd service manager" // {
-        default = pkgs.stdenv.isLinux;
-        defaultText = literalExpression "pkgs.stdenv.isLinux";
+        default = pkgs.stdenv.hostPlatform.isLinux;
+        defaultText = literalExpression "pkgs.stdenv.hostPlatform.isLinux";
       };
 
       systemctlPath = mkOption {
@@ -246,6 +259,20 @@ in
           Absolute path to the {command}`systemctl` tool. This
           option may need to be set if running Home Manager on a
           non-NixOS distribution.
+        '';
+      };
+
+      packages = mkOption {
+        type = with types; listOf package;
+        default = [ ];
+        description = ''
+          Packages providing systemd user units.
+
+          This is the Home Manager equivalent of NixOS’s `systemd.packages`
+          option.
+
+          Files in {file}`«pkg»/share/systemd/user` will be included in the
+          user’s {file}`$XDG_DATA_HOME/systemd/user` directory.
         '';
       };
 
@@ -387,11 +414,9 @@ in
                       ])
                     );
                   default = { };
-                  example = literalExpression ''
-                    {
-                      PATH = "%u/bin:%u/.cargo/bin";
-                    }
-                  '';
+                  example = {
+                    PATH = "%u/bin:%u/.cargo/bin";
+                  };
                   apply = value: concatStringsSep " " (mapAttrsToList (n: v: "${n}=${escapeShellArg v}") value);
                 }
                 // args;
@@ -412,11 +437,9 @@ in
             };
         };
         default = { };
-        example = literalExpression ''
-          {
-            Manager.DefaultCPUAccounting = true;
-          }
-        '';
+        example = {
+          Manager.DefaultCPUAccounting = true;
+        };
         description = ''
           Extra config options for user session service manager. See {manpage}`systemd-user.conf(5)` for
           available options.
@@ -427,13 +450,9 @@ in
 
   # If we run under a Linux system we assume that systemd is
   # available, in particular we assume that systemctl is in PATH.
-  # Do not install any user services if username is root.
-  config = mkIf (cfg.enable && config.home.username != "root") {
+  config = mkIf cfg.enable {
     assertions = [
-      {
-        assertion = pkgs.stdenv.isLinux;
-        message = "This module is only available on Linux.";
-      }
+      (lib.hm.assertions.assertPlatform "systemd" pkgs lib.platforms.linux)
     ];
 
     xdg.configFile = mkMerge [
@@ -452,6 +471,17 @@ in
 
       settings
     ];
+
+    xdg.dataFile = lib.mkIf (cfg.packages != [ ]) {
+      "systemd/user" = {
+        recursive = true;
+        source = pkgs.symlinkJoin {
+          name = "user-systemd-units";
+          paths = cfg.packages;
+          stripPrefix = "/share/systemd/user";
+        };
+      };
+    };
 
     # Run systemd service reload if user is logged in. If we're
     # running this from the NixOS module then XDG_RUNTIME_DIR is not

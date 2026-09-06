@@ -9,6 +9,18 @@ let
 
   cfg = config.programs.pistol;
 
+  configDir =
+    # NOTE: This intentionally diverges from the documentation
+    # pistol's README claims that the default is Library/Preferences
+    # However, this is part of a default set for XDG_CONFIG_DIRS,
+    # which gets overwritten by, e.g., nix-darwin.
+    # In such cases, the only directory checked is `XDG_CONFIG_HOME`,
+    # which falls back to Library/Application Support/.
+    if pkgs.stdenv.hostPlatform.isDarwin && !config.xdg.enable then
+      "Library/Application Support"
+    else
+      config.xdg.configHome;
+
   configFile = lib.concatStringsSep "\n" (
     map (
       {
@@ -42,6 +54,8 @@ let
   };
 in
 {
+  meta.maintainers = [ lib.maintainers.mtoohey ];
+
   imports = [
     (lib.mkRemovedOptionModule [
       "programs"
@@ -49,9 +63,6 @@ in
       "config"
     ] "Pistol is now configured with programs.pistol.associations.")
   ];
-
-  meta.maintainers = [ lib.maintainers.mtoohey ];
-
   options.programs.pistol = {
     enable = lib.mkEnableOption "file previewer for terminal file managers";
 
@@ -60,13 +71,20 @@ in
     associations = mkOption {
       type = types.listOf association;
       default = [ ];
-      example = lib.literalExpression ''
-        [
-          { mime = "application/json"; command = "bat %pistol-filename%"; }
-          { mime = "application/*"; command = "hexyl %pistol-filename%"; }
-          { fpath = ".*.md$"; command = "sh: bat --paging=never --color=always %pistol-filename% | head -8"; }
-        ]
-      '';
+      example = [
+        {
+          mime = "application/json";
+          command = "bat %pistol-filename%";
+        }
+        {
+          mime = "application/*";
+          command = "hexyl %pistol-filename%";
+        }
+        {
+          fpath = ".*.md$";
+          command = "sh: bat --paging=never --color=always %pistol-filename% | head -8";
+        }
+      ];
       description = ''
         Associations written to the Pistol configuration at
         {file}`$XDG_CONFIG_HOME/pistol/pistol.conf`.
@@ -75,31 +93,23 @@ in
 
   };
 
-  config = mkIf cfg.enable (
-    lib.mkMerge [
+  config = mkIf cfg.enable {
+    assertions = [
       {
-        assertions = [
-          {
-            assertion = lib.all (
-              { fpath, mime, ... }: (fpath != "" && mime == "") || (fpath == "" && mime != "")
-            ) cfg.associations;
-            message = ''
-              Each entry in programs.pistol.associations must contain exactly one
-              of fpath or mime.
-            '';
-          }
-        ];
-
-        home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
+        assertion = lib.all (
+          { fpath, mime, ... }: (fpath != "" && mime == "") || (fpath == "" && mime != "")
+        ) cfg.associations;
+        message = ''
+          Each entry in programs.pistol.associations must contain exactly one
+          of fpath or mime.
+        '';
       }
+    ];
 
-      (mkIf (cfg.associations != [ ] && pkgs.stdenv.hostPlatform.isDarwin) {
-        home.file."Library/Preferences/pistol/pistol.conf".text = configFile;
-      })
+    home.packages = lib.mkIf (cfg.package != null) [ cfg.package ];
 
-      (mkIf (cfg.associations != [ ] && !pkgs.stdenv.hostPlatform.isDarwin) {
-        xdg.configFile."pistol/pistol.conf".text = configFile;
-      })
-    ]
-  );
+    home.file."${configDir}/pistol/pistol.conf" = mkIf (cfg.associations != [ ]) {
+      text = configFile;
+    };
+  };
 }

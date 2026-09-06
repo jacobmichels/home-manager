@@ -65,45 +65,42 @@ in
     keybinds = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
-      example = lib.literalExpression ''
-        {
-          Mod4-o = "split right";
-          Mod4-u = "split bottom";
-        }
-      '';
+      example = {
+        Mod4-o = "split right";
+        Mod4-u = "split bottom";
+      };
       description = "Herbstluftwm keybinds.";
     };
 
     mousebinds = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
-      example = lib.literalExpression ''
-        {
-          Mod4-B1 = "move";
-          Mod4-B3 = "resize";
-        }
-      '';
+      example = {
+        Mod4-B1 = "move";
+        Mod4-B3 = "resize";
+      };
       description = "Herbstluftwm mousebinds.";
     };
 
     rules = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      example = lib.literalExpression ''
-        [
-          "windowtype~'_NET_WM_WINDOW_TYPE_(DIALOG|UTILITY|SPLASH)' focus=on pseudotile=on"
-          "windowtype~'_NET_WM_WINDOW_TYPE_(NOTIFICATION|DOCK|DESKTOP)' manage=off"
-        ]
-      '';
+      example = [
+        "windowtype~'_NET_WM_WINDOW_TYPE_(DIALOG|UTILITY|SPLASH)' focus=on pseudotile=on"
+        "windowtype~'_NET_WM_WINDOW_TYPE_(NOTIFICATION|DOCK|DESKTOP)' manage=off"
+      ];
       description = "Herbstluftwm rules.";
     };
 
     tags = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      example = lib.literalExpression ''
-        [ "work" "browser" "music" "gaming" ]
-      '';
+      example = [
+        "work"
+        "browser"
+        "music"
+        "gaming"
+      ];
       description = "Tags to create on startup.";
     };
 
@@ -119,6 +116,24 @@ in
         {file}`$XDG_CONFIG_HOME/herbstluftwm/autostart`.
       '';
     };
+
+    enableAlias = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Set an alias for the {command}`herbstclient` command in the
+        {file}`autostart` script that only stores its arguments and executes
+        them all at once at the end of the {file}`autostart` script.
+
+        This reduces the amount of flickering you get while all options are
+        being applied and improves the performance.
+
+        On the other hand, this makes it more difficult to write bash functions
+        that call {command}`herbstclient`. You can work around this by calling
+        {command}`command herbstclient` in your functions to still get some of
+        the benefits of enabling this alias.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -131,11 +146,13 @@ in
     xsession.windowManager.command = "${cfg.package}/bin/herbstluftwm --locked";
 
     xdg.configFile."herbstluftwm/autostart".source = pkgs.writeShellScript "herbstluftwm-autostart" ''
-      shopt -s expand_aliases
+      ${lib.optionalString cfg.enableAlias ''
+        shopt -s expand_aliases
 
-      # shellcheck disable=SC2142
-      alias herbstclient='set -- "$@" ";"'
-      set --
+        # shellcheck disable=SC2142
+        alias herbstclient='set -- "$@" ";"'
+        set --
+      ''}
 
       herbstclient emit_hook reload
 
@@ -169,7 +186,9 @@ in
 
       herbstclient unlock
 
-      ${cfg.package}/bin/herbstclient chain ";" "$@"
+      ${lib.optionalString cfg.enableAlias ''
+        ${cfg.package}/bin/herbstclient chain ";" "$@"
+      ''}
     '';
   };
 }

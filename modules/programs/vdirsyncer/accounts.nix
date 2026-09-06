@@ -67,6 +67,17 @@ in
       '';
     };
 
+    localReadOnly = mkOption {
+      type = types.nullOr types.bool;
+      default = null;
+      description = ''
+        Whether vdirsyncer should treat the local storage as read-only.
+
+        Changes that cannot be written to the local storage are handled
+        according to the value of the `partialSync` option.
+      '';
+    };
+
     metadata = mkOption {
       type = types.listOf types.str;
       default = [ ];
@@ -115,6 +126,15 @@ in
         Kinds of items to show. The default is to show everything.
         This depends on particular features of the server, the results
         are not validated.
+      '';
+    };
+
+    useVcard4 = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Specifies whether vdirsyncer should request vCards in version 4.0.
+        If set to `false` then vdirsyncer will default to version 3.0.
       '';
     };
 

@@ -35,7 +35,7 @@ in
 
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ];
-    programs.git.extraConfig.credential =
+    programs.git.settings.credential =
       let
         helperConfig =
           let
@@ -52,7 +52,7 @@ in
       if cfg.hosts == [ ] then
         helperConfig
       else
-        lib.listToAttrs (map (host: lib.nameValuePair host helperConfig)) cfg.hosts;
+        lib.listToAttrs (map (host: lib.nameValuePair host helperConfig) cfg.hosts);
   };
 
 }

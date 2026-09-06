@@ -13,7 +13,7 @@ let
 
   # jj v0.29+ deprecated support for "~/Library/Application Support" on Darwin.
   configDir =
-    if pkgs.stdenv.isDarwin && !(lib.versionAtLeast packageVersion "0.29.0") then
+    if pkgs.stdenv.hostPlatform.isDarwin && !(lib.versionAtLeast packageVersion "0.29.0") then
       "Library/Application Support"
     else
       config.xdg.configHome;
@@ -52,7 +52,7 @@ in
     };
 
     settings = mkOption {
-      type = tomlFormat.type;
+      inherit (tomlFormat) type;
       default = { };
       example = {
         user = {

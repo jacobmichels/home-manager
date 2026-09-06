@@ -18,40 +18,38 @@ in
     package = lib.mkPackageOption pkgs "shikane" { };
 
     settings = lib.mkOption {
-      type = tomlFormat.type;
+      inherit (tomlFormat) type;
       default = { };
-      example = lib.literalExpression ''
-        {
-          profile = [
-            {
-              name = "external-monitor-default";
-              output = [
-                {
-                  match = "eDP-1";
-                  enable = true;
-                }
-                {
-                  match = "HDMI-A-1";
-                  enable = true;
-                  position = {
-                    x = 1920;
-                    y = 0;
-                  };
-                }
-              ];
-            }
-            {
-              name = "builtin-monitor-only";
-              output = [
-                {
-                  match = "eDP-1";
-                  enable = true;
-                }
-              ];
-            }
-          ];
-        }
-      '';
+      example = {
+        profile = [
+          {
+            name = "external-monitor-default";
+            output = [
+              {
+                match = "eDP-1";
+                enable = true;
+              }
+              {
+                match = "HDMI-A-1";
+                enable = true;
+                position = {
+                  x = 1920;
+                  y = 0;
+                };
+              }
+            ];
+          }
+          {
+            name = "builtin-monitor-only";
+            output = [
+              {
+                match = "eDP-1";
+                enable = true;
+              }
+            ];
+          }
+        ];
+      };
       description = ''
         Configuration written to
         <filename>$XDG_CONFIG_HOME/shikane/config.toml</filename>.
@@ -66,6 +64,8 @@ in
     assertions = [
       (lib.hm.assertions.assertPlatform "services.shikane" pkgs lib.platforms.linux)
     ];
+
+    home.packages = [ cfg.package ];
 
     xdg.configFile."shikane/config.toml" = lib.mkIf (cfg.settings != { }) {
       source = tomlFormat.generate "shikane-config" cfg.settings;

@@ -11,7 +11,7 @@ let
     types
     ;
 
-  mergeSets = sets: lib.lists.fold lib.attrsets.recursiveUpdate { } sets;
+  mergeSets = sets: lib.lists.foldr lib.attrsets.recursiveUpdate { } sets;
 
   yaml = pkgs.formats.yaml { };
 
@@ -47,17 +47,15 @@ in
       package = lib.mkPackageOption pkgs "udiskie" { };
 
       settings = mkOption {
-        type = yaml.type;
+        inherit (yaml) type;
         default = { };
-        example = lib.literalExpression ''
-          {
-            program_options = {
-              udisks_version = 2;
-              tray = true;
-            };
-            icon_names.media = [ "media-optical" ];
-          }
-        '';
+        example = {
+          program_options = {
+            udisks_version = 2;
+            tray = true;
+          };
+          icon_names.media = [ "media-optical" ];
+        };
         description = ''
           Configuration written to
           {file}`$XDG_CONFIG_HOME/udiskie/config.yml`.
@@ -112,7 +110,7 @@ in
     xdg.configFile."udiskie/config.yml".source = yaml.generate "udiskie-config.yml" (mergeSets [
       {
         program_options = {
-          automount = cfg.automount;
+          inherit (cfg) automount;
           tray =
             if cfg.tray == "always" then
               true
@@ -120,7 +118,7 @@ in
               false
             else
               "auto";
-          notify = cfg.notify;
+          inherit (cfg) notify;
         };
       }
       cfg.settings

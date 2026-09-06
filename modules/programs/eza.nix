@@ -9,6 +9,8 @@ let
   yamlFormat = pkgs.formats.yaml { };
 in
 {
+  meta.maintainers = [ lib.maintainers.cafkafk ];
+
   imports =
     let
       msg = ''
@@ -35,9 +37,6 @@ in
       "git"
     ])
     ++ [ (lib.mkRemovedOptionModule [ "programs" "eza" "enableAliases" ] msg) ];
-
-  meta.maintainers = [ lib.maintainers.cafkafk ];
-
   options.programs.eza = {
     enable = lib.mkEnableOption "eza, a modern replacement for {command}`ls`";
 
@@ -108,7 +107,7 @@ in
     package = lib.mkPackageOption pkgs "eza" { nullable = true; };
 
     theme = mkOption {
-      type = yamlFormat.type;
+      inherit (yamlFormat) type;
       default = { };
       description = ''
         Written to {file}`$XDG_CONFIG_HOME/eza/theme.yml`

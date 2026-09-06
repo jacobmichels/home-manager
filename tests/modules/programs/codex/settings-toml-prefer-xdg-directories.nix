@@ -11,17 +11,28 @@ in
   programs.codex = {
     enable = true;
     package = codexPackage;
+    rules.default = ''
+      prefix_rule(
+        pattern = ["nix", "build"],
+        decision = "allow",
+        justification = "Allow local builds",
+      )
+    '';
     settings = {
       model = "gemma3:latest";
       model_provider = "ollama";
       model_providers = {
         ollama = {
           name = "Ollama";
-          baseURL = "http://localhost:11434/v1";
-          envKey = "OLLAMA_API_KEY";
+          base_url = "http://localhost:11434/v1";
+          env_key = "OLLAMA_API_KEY";
         };
       };
     };
+    context = ''
+      - Always respond with emojis
+      - Only use git commands when explicitly requested
+    '';
   };
   nmt.script = ''
     assertFileContains home-path/etc/profile.d/hm-session-vars.sh \
@@ -29,5 +40,17 @@ in
     assertFileExists home-files/.config/codex/config.toml
     assertFileContent home-files/.config/codex/config.toml \
       ${./config.toml}
+    assertFileExists home-files/.config/codex/AGENTS.md
+    assertFileContent home-files/.config/codex/AGENTS.md \
+      ${./AGENTS.md}
+    assertFileExists home-files/.config/codex/rules/default.rules
+    assertFileContent home-files/.config/codex/rules/default.rules \
+      ${builtins.toFile "expected-xdg-default.rules" ''
+        prefix_rule(
+          pattern = ["nix", "build"],
+          decision = "allow",
+          justification = "Allow local builds",
+        )
+      ''}
   '';
 }

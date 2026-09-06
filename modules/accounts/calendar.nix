@@ -127,7 +127,7 @@ let
       };
 
       config = {
-        name = name;
+        inherit name;
       };
     };
 
@@ -150,6 +150,7 @@ in
         types.submodule [
           calendarOpts
           (import ../programs/vdirsyncer/accounts.nix)
+          (import ../programs/pimsync/accounts.nix)
           (import ../programs/khal/accounts.nix)
           (import ../programs/khal/calendar-accounts.nix)
         ]

@@ -107,7 +107,7 @@ rec {
         sameOrNull = x: y: if x == y then y else null;
         # A bit naive to just check the first entry…
         sharedDefType = foldl' sameOrNull (head defTypes) defTypes;
-        allChecked = all (x: check x) vals;
+        allChecked = all check vals;
       in
       if sharedDefType == null then
         throw (
@@ -116,7 +116,7 @@ rec {
           + " ${showFiles (getFiles defs)}."
         )
       else if gvar.isArray sharedDefType && allChecked then
-        gvar.mkValue ((types.listOf gvariant).merge loc (map (d: d // { value = d.value.value; }) vdefs))
+        gvar.mkValue ((types.listOf gvariant).merge loc (map (d: d // { inherit (d.value) value; }) vdefs))
         // {
           type = sharedDefType;
         }
@@ -237,4 +237,41 @@ rec {
           ) defs
         );
     };
+
+  SCFGDirectives =
+    let
+      inherit (types)
+        listOf
+        nullOr
+        submodule
+        ;
+      primType =
+        with types;
+        oneOf [
+          int
+          float
+          str
+          bool
+        ];
+      directive =
+        (submodule {
+          options = {
+            name = mkOption { type = types.str; };
+            params = mkOption {
+              type = nullOr (listOf primType);
+              default = null;
+            };
+            children = mkOption {
+              type = nullOr directives;
+              default = null;
+            };
+          };
+        })
+        // {
+          description = "test";
+        };
+      directives = listOf directive;
+    in
+    # directives;
+    lib.types.anything;
 }

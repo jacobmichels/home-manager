@@ -7,90 +7,28 @@
 let
   inherit (lib)
     concatStringsSep
-    literalExpression
     mkDefault
     mkEnableOption
     mkIf
     mkOption
     mkOptionDefault
-    mkPackageOption
     types
     ;
 
   cfg = config.programs.git;
 
-  gitIniType =
-    with types;
-    let
-      primitiveType = either str (either bool int);
-      multipleType = either primitiveType (listOf primitiveType);
-      sectionType = attrsOf multipleType;
-      supersectionType = attrsOf (either multipleType sectionType);
-    in
-    attrsOf supersectionType;
-
-  includeModule = types.submodule (
-    { config, ... }:
-    {
-      options = {
-        condition = mkOption {
-          type = types.nullOr types.str;
-          default = null;
-          description = ''
-            Include this configuration only when {var}`condition`
-            matches. Allowed conditions are described in
-            {manpage}`git-config(1)`.
-          '';
-        };
-
-        path = mkOption {
-          type = with types; either str path;
-          description = "Path of the configuration file to include.";
-        };
-
-        contents = mkOption {
-          type = types.attrsOf types.anything;
-          default = { };
-          example = literalExpression ''
-            {
-              user = {
-                email = "bob@work.example.com";
-                name = "Bob Work";
-                signingKey = "1A2B3C4D5E6F7G8H";
-              };
-              commit = {
-                gpgSign = true;
-              };
-            };
-          '';
-          description = ''
-            Configuration to include. If empty then a path must be given.
-
-            This follows the configuration structure as described in
-            {manpage}`git-config(1)`.
-          '';
-        };
-
-        contentSuffix = mkOption {
-          type = types.str;
-          default = "gitconfig";
-          description = ''
-            Nix store name for the git configuration text file,
-            when generating the configuration text from nix options.
-          '';
-
-        };
-      };
-      config.path = mkIf (config.contents != { }) (
-        mkDefault (
-          pkgs.writeText (lib.hm.strings.storeFileName config.contentSuffix) (
-            lib.generators.toGitINI config.contents
-          )
-        )
-      );
-    }
-  );
-
+  signingFormatStateVersionDefault = lib.hm.deprecations.mkStateVersionOptionDefault {
+    inherit (config.home) stateVersion;
+    since = "25.05";
+    optionPath = [
+      "programs"
+      "git"
+      "signing"
+      "format"
+    ];
+    legacy.value = "openpgp";
+    current.value = null;
+  };
 in
 {
   meta.maintainers = with lib.maintainers; [
@@ -98,458 +36,384 @@ in
     rycee
   ];
 
-  options = {
-    programs.git = {
-      enable = mkEnableOption "Git";
+  options =
+    let
+      gitIniType =
+        with types;
+        let
+          primitiveType = either str (either bool int);
+          multipleType = either primitiveType (listOf primitiveType);
+          sectionType = attrsOf multipleType;
+          supersectionType = attrsOf (either multipleType sectionType);
+        in
+        attrsOf supersectionType;
+    in
+    {
+      programs.git = {
+        enable = mkEnableOption "Git";
 
-      package = lib.mkPackageOption pkgs "git" {
-        example = "pkgs.gitFull";
-        extraDescription = ''
-          Use {var}`pkgs.gitFull`
-          to gain access to {command}`git send-email` for instance.
-        '';
-      };
-
-      userName = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        description = "Default user name to use.";
-      };
-
-      userEmail = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        description = "Default user email to use.";
-      };
-
-      aliases = mkOption {
-        type = types.attrsOf types.str;
-        default = { };
-        example = {
-          co = "checkout";
-        };
-        description = "Git aliases to define.";
-      };
-
-      signing = {
-        key = mkOption {
-          type = types.nullOr types.str;
-          default = null;
-          description = ''
-            The default signing key fingerprint.
-
-            Set to `null` to let the signer decide what signing key
-            to use depending on commit’s author.
+        package = lib.mkPackageOption pkgs "git" {
+          nullable = true;
+          example = "pkgs.gitFull";
+          extraDescription = ''
+            Use {var}`pkgs.gitFull`
+            to gain access to {command}`git send-email` for instance.
           '';
         };
 
-        format = mkOption {
-          type = types.nullOr (
-            types.enum [
-              "openpgp"
-              "ssh"
-              "x509"
-            ]
-          );
-          defaultText = literalExpression ''
-            "openpgp" for state version < 25.05,
-            undefined for state version ≥ 25.05
-          '';
-          description = ''
-            The signing method to use when signing commits and tags.
-            Valid values are `openpgp` (OpenPGP/GnuPG), `ssh` (SSH), and `x509` (X.509 certificates).
-          '';
-        };
+        signing = {
+          allowedSigners = mkOption {
+            type = types.lines;
+            default = "";
+            example = ''
+              user@example.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...
+            '';
+            description = ''
+              SSH public keys trusted when verifying signed commits and tags.
 
-        signByDefault = mkOption {
-          type = types.nullOr types.bool;
-          default = null;
-          description = "Whether commits and tags should be signed by default.";
-        };
-
-        signer = mkOption {
-          type = types.nullOr types.str;
-          description = "Path to signer binary to use.";
-        };
-      };
-
-      extraConfig = mkOption {
-        type = types.either types.lines gitIniType;
-        default = { };
-        example = {
-          core = {
-            whitespace = "trailing-space,space-before-tab";
+              Each line must follow the allowed signers format described in
+              {manpage}`ssh-keygen(1)`. When non-empty, the content is written
+              to {file}`$XDG_CONFIG_HOME/git/allowed_signers` and configured as
+              Git's `gpg.ssh.allowedSignersFile` setting.
+            '';
           };
-          url."ssh://git@host".insteadOf = "otherhost";
+
+          key = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            description = ''
+              The default signing key fingerprint.
+
+              Set to `null` to let the signer decide what signing key
+              to use depending on commit’s author.
+            '';
+          };
+
+          format = mkOption {
+            type = types.nullOr (
+              types.enum [
+                "openpgp"
+                "ssh"
+                "x509"
+              ]
+            );
+            inherit (signingFormatStateVersionDefault) defaultText;
+            description = ''
+              The signing method to use when signing commits and tags.
+              Valid values are `openpgp` (OpenPGP/GnuPG), `ssh` (SSH), and `x509` (X.509 certificates).
+            '';
+          };
+
+          signByDefault = mkOption {
+            type = types.nullOr types.bool;
+            default = null;
+            description = "Whether commits and tags should be signed by default.";
+          };
+
+          signer = mkOption {
+            type = types.nullOr types.str;
+            description = "Path to signer binary to use.";
+          };
         };
-        description = ''
-          Additional configuration to add. The use of string values is
-          deprecated and will be removed in the future.
-        '';
-      };
 
-      hooks = mkOption {
-        type = types.attrsOf types.path;
-        default = { };
-        example = literalExpression ''
-          {
-            pre-commit = ./pre-commit-script;
-          }
-        '';
-        description = ''
-          Configuration helper for Git hooks.
-          See <https://git-scm.com/docs/githooks>
-          for reference.
-        '';
-      };
+        settings = mkOption {
+          type = with types; either gitIniType (listOf gitIniType);
+          default = { };
+          example = [
+            {
+              core = {
+                whitespace = "trailing-space,space-before-tab";
+              };
+              url."ssh://git@host".insteadOf = "otherhost";
+            }
+            {
+              credential."https://example.com".helper = "";
+            }
+            {
+              credential."https://example.com".helper = "oauth";
+            }
+          ];
+          description = ''
+            Configuration written to {file}`$XDG_CONFIG_HOME/git/config`.
+            This may be either a single attrset of Git settings or an ordered
+            list of attrset fragments when repeated sections or explicit
+            ordering matter.
 
-      iniContent = mkOption {
-        type = gitIniType;
-        internal = true;
-      };
+            See {manpage}`git-config(1)` for details.
+          '';
+        };
 
-      ignores = mkOption {
-        type = types.listOf types.str;
-        default = [ ];
-        example = [
-          "*~"
-          "*.swp"
-        ];
-        description = "List of paths that should be globally ignored.";
-      };
+        hooks = mkOption {
+          type = types.attrsOf types.path;
+          default = { };
+          example = lib.literalExpression ''
+            {
+              pre-commit = ./pre-commit-script;
+            }
+          '';
+          description = ''
+            Configuration helper for Git hooks.
+            See <https://git-scm.com/docs/githooks>
+            for reference.
+          '';
+        };
 
-      attributes = mkOption {
-        type = types.listOf types.str;
-        default = [ ];
-        example = [ "*.pdf diff=pdf" ];
-        description = "List of defining attributes set globally.";
-      };
+        iniContent = mkOption {
+          type = gitIniType;
+          internal = true;
+        };
 
-      includes = mkOption {
-        type = types.listOf includeModule;
-        default = [ ];
-        example = literalExpression ''
-          [
+        ignores = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          example = [
+            "*~"
+            "*.swp"
+          ];
+          description = "List of paths that should be globally ignored.";
+        };
+
+        attributes = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          example = [ "*.pdf diff=pdf" ];
+          description = "List of defining attributes set globally.";
+        };
+
+        includes = mkOption {
+          type = types.listOf (
+            types.submodule (
+              { config, ... }:
+              {
+                options = {
+                  condition = mkOption {
+                    type = types.nullOr types.str;
+                    default = null;
+                    description = ''
+                      Include this configuration only when {var}`condition`
+                      matches. Allowed conditions are described in
+                      {manpage}`git-config(1)`.
+                    '';
+                  };
+
+                  path = mkOption {
+                    type = with types; either str path;
+                    description = "Path of the configuration file to include.";
+                  };
+
+                  contents = mkOption {
+                    type = types.attrsOf types.anything;
+                    default = { };
+                    example = {
+                      user = {
+                        email = "bob@work.example.com";
+                        name = "Bob Work";
+                        signingKey = "1A2B3C4D5E6F7G8H";
+                      };
+                      commit = {
+                        gpgSign = true;
+                      };
+                    };
+                    description = ''
+                      Configuration to include. If empty then a path must be given.
+
+                      This follows the configuration structure as described in
+                      {manpage}`git-config(1)`.
+                    '';
+                  };
+
+                  contentSuffix = mkOption {
+                    type = types.str;
+                    default = "gitconfig";
+                    description = ''
+                      Nix store name for the git configuration text file,
+                      when generating the configuration text from nix options.
+                    '';
+
+                  };
+                };
+                config.path = mkIf (config.contents != { }) (
+                  mkDefault (
+                    pkgs.writeText (lib.hm.strings.storeFileName config.contentSuffix) (
+                      lib.generators.toGitINI config.contents
+                    )
+                  )
+                );
+              }
+            )
+          );
+          default = [ ];
+          example = [
             { path = "~/path/to/config.inc"; }
             {
               path = "~/path/to/conditional.inc";
               condition = "gitdir:~/src/dir";
             }
-          ]
-        '';
-        description = "List of configuration files to include.";
-      };
-
-      lfs = {
-        enable = mkEnableOption "Git Large File Storage";
-
-        skipSmudge = mkOption {
-          type = types.bool;
-          default = false;
-          description = ''
-            Skip automatic downloading of objects on clone or pull.
-            This requires a manual {command}`git lfs pull`
-            every time a new commit is checked out on your repository.
-          '';
-        };
-      };
-
-      maintenance = {
-        enable = mkEnableOption "" // {
-          description = ''
-            Enable the automatic {command}`git maintenance`.
-
-            If you have SSH remotes, set {option}`programs.git.package` to a
-            git version with SSH support (eg: `pkgs.gitFull`).
-
-            See <https://git-scm.com/docs/git-maintenance>.
-          '';
-        };
-
-        repositories = mkOption {
-          type = with types; listOf str;
-          default = [ ];
-          description = ''
-            Repositories on which {command}`git maintenance` should run.
-
-            Should be a list of absolute paths.
-          '';
-        };
-
-        timers = mkOption {
-          type = types.attrsOf types.str;
-          default = {
-            hourly = "*-*-* 1..23:53:00";
-            daily = "Tue..Sun *-*-* 0:53:00";
-            weekly = "Mon 0:53:00";
-          };
-          description = ''
-            Systemd timers to create for scheduled {command}`git maintenance`.
-
-            Key is passed to `--schedule` argument in {command}`git maintenance run`
-            and value is passed to `Timer.OnCalendar` in `systemd.user.timers`.
-          '';
-        };
-      };
-
-      diff-highlight = {
-        enable = mkEnableOption "" // {
-          description = ''
-            Enable the contrib {command}`diff-highlight` syntax highlighter.
-            See <https://github.com/git/git/blob/master/contrib/diff-highlight/README>,
-          '';
-        };
-
-        pagerOpts = mkOption {
-          type = types.listOf types.str;
-          default = [ ];
-          example = [
-            "--tabs=4"
-            "-RFX"
           ];
-          description = ''
-            Arguments to be passed to {command}`less`.
-          '';
-        };
-      };
-
-      difftastic = {
-        enable = mkEnableOption "" // {
-          description = ''
-            Enable the {command}`difftastic` syntax highlighter.
-            See <https://github.com/Wilfred/difftastic>.
-          '';
+          description = "List of configuration files to include.";
         };
 
-        package = mkPackageOption pkgs "difftastic" { };
+        lfs = {
+          enable = mkEnableOption "Git Large File Storage";
 
-        enableAsDifftool = mkEnableOption "" // {
-          description = ''
-            Enable the {command}`difftastic` syntax highlighter as a git difftool.
-            See <https://github.com/Wilfred/difftastic>.
-          '';
-        };
+          package = lib.mkPackageOption pkgs "git-lfs" { nullable = true; };
 
-        options = mkOption {
-          type =
-            with lib.types;
-            attrsOf (oneOf [
-              str
-              number
-              bool
-            ]);
-          default = { };
-          example = {
-            color = "dark";
-            sort-path = true;
-            tab-width = 8;
+          skipSmudge = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Skip automatic downloading of objects on clone or pull.
+              This requires a manual {command}`git lfs pull`
+              every time a new commit is checked out on your repository.
+            '';
           };
-          description = "Configuration options for {command}`difftastic`. See {command}`difft --help`";
-        };
-      };
-
-      delta = {
-        enable = mkEnableOption "" // {
-          description = ''
-            Whether to enable the {command}`delta` syntax highlighter.
-            See <https://github.com/dandavison/delta>.
-          '';
         };
 
-        package = mkPackageOption pkgs "delta" { };
+        maintenance = {
+          enable = mkEnableOption "" // {
+            description = ''
+              Enable the automatic {command}`git maintenance`.
 
-        options = mkOption {
-          type =
-            with types;
-            let
-              primitiveType = either str (either bool int);
-              sectionType = attrsOf primitiveType;
-            in
-            attrsOf (either primitiveType sectionType);
-          default = { };
-          example = {
-            features = "decorations";
-            whitespace-error-style = "22 reverse";
-            decorations = {
-              commit-decoration-style = "bold yellow box ul";
-              file-style = "bold yellow ul";
-              file-decoration-style = "none";
+              If you have SSH remotes, set {option}`programs.git.package` to a
+              git version with SSH support (eg: `pkgs.gitFull`).
+
+              See <https://git-scm.com/docs/git-maintenance>.
+            '';
+          };
+
+          repositories = mkOption {
+            type = with types; listOf str;
+            default = [ ];
+            description = ''
+              Repositories on which {command}`git maintenance` should run.
+
+              Should be a list of absolute paths.
+            '';
+          };
+
+          timers = mkOption {
+            type = types.attrsOf types.str;
+            default = {
+              hourly = "*-*-* 1..23:53:00";
+              daily = "Tue..Sun *-*-* 0:53:00";
+              weekly = "Mon 0:53:00";
             };
+            description = ''
+              Systemd timers to create for scheduled {command}`git maintenance`.
+
+              Key is passed to `--schedule` argument in {command}`git maintenance run`
+              and value is passed to `Timer.OnCalendar` in `systemd.user.timers`.
+            '';
           };
-          description = ''
-            Options to configure delta.
-          '';
         };
-      };
-
-      diff-so-fancy = {
-        enable = mkEnableOption "" // {
-          description = ''
-            Enable the {command}`diff-so-fancy` diff colorizer.
-            See <https://github.com/so-fancy/diff-so-fancy>.
-          '';
-        };
-
-        pagerOpts = mkOption {
-          type = types.listOf types.str;
-          default = [
-            "--tabs=4"
-            "-RFX"
-          ];
-          description = ''
-            Arguments to be passed to {command}`less`.
-          '';
-        };
-
-        markEmptyLines = mkOption {
-          type = types.bool;
-          default = true;
-          example = false;
-          description = ''
-            Whether the first block of an empty line should be colored.
-          '';
-        };
-
-        changeHunkIndicators = mkOption {
-          type = types.bool;
-          default = true;
-          example = false;
-          description = ''
-            Simplify git header chunks to a more human readable format.
-          '';
-        };
-
-        stripLeadingSymbols = mkOption {
-          type = types.bool;
-          default = true;
-          example = false;
-          description = ''
-            Whether the `+` or `-` at
-            line-start should be removed.
-          '';
-        };
-
-        useUnicodeRuler = mkOption {
-          type = types.bool;
-          default = true;
-          example = false;
-          description = ''
-            By default, the separator for the file header uses Unicode
-            line-drawing characters. If this is causing output errors on
-            your terminal, set this to false to use ASCII characters instead.
-          '';
-        };
-
-        rulerWidth = mkOption {
-          type = types.nullOr types.int;
-          default = null;
-          example = false;
-          description = ''
-            By default, the separator for the file header spans the full
-            width of the terminal. Use this setting to set the width of
-            the file header manually.
-          '';
-        };
-      };
-
-      riff = {
-        enable = mkEnableOption "" // {
-          description = ''
-            Enable the <command>riff</command> diff highlighter.
-            See <link xlink:href="https://github.com/walles/riff" />.
-          '';
-        };
-
-        package = mkPackageOption pkgs "riffdiff" { };
-
-        commandLineOptions = mkOption {
-          type = types.listOf types.str;
-          default = [ ];
-          example = literalExpression ''[ "--no-adds-only-special" ]'';
-          apply = lib.concatStringsSep " ";
-          description = ''
-            Command line arguments to include in the <command>RIFF</command> environment variable.
-
-            Run <command>riff --help</command> for a full list of options
-          '';
-        };
-      };
-
-      patdiff = {
-        enable = mkEnableOption "" // {
-          description = ''
-            Whether to enable the {command}`patdiff` differ.
-            See <https://opensource.janestreet.com/patdiff/>
-          '';
-        };
-
-        package = mkPackageOption pkgs "patdiff" { };
       };
     };
-  };
 
-  imports = [
-    (lib.mkRenamedOptionModule
-      [ "programs" "git" "signing" "gpgPath" ]
-      [
+  imports =
+    let
+      oldPrefix = [
         "programs"
         "git"
-        "signing"
-        "signer"
-      ]
-    )
-  ]
-  ++ (
-    let
-      mkRenamed =
-        opt:
-        lib.mkRenamedOptionModule
-          [ "programs" "git" "difftastic" opt ]
-          [ "programs" "git" "difftastic" "options" opt ];
+      ];
+      newPrefix = [
+        "programs"
+        "git"
+        "settings"
+      ];
     in
-    map mkRenamed [
-      "background"
-      "color"
-      "context"
-      "display"
+    [
+      (lib.mkRenamedOptionModule
+        [ "programs" "git" "signing" "gpgPath" ]
+        [
+          "programs"
+          "git"
+          "signing"
+          "signer"
+        ]
+      )
+      (lib.mkRenamedOptionModule [ "programs" "git" "extraConfig" ] [ "programs" "git" "settings" ])
     ]
-  )
-  ++ [
-    (lib.mkRemovedOptionModule [ "programs" "git" "difftastic" "extraArgs" ] ''
-      'programs.git.difftastic.extraArgs' has been replaced by 'programs.git.difftastic.options'
-    '')
-  ];
+    ++ (lib.hm.deprecations.mkSettingsRenamedOptionModules oldPrefix newPrefix
+      {
+        transform = x: x;
+      }
+      [
+        {
+          old = [ "userName" ];
+          new = [
+            "user"
+            "name"
+          ];
+        }
+        {
+          old = [ "userEmail" ];
+          new = [
+            "user"
+            "email"
+          ];
+        }
+        {
+          old = [ "aliases" ];
+          new = [ "alias" ];
+        }
+      ]
+    );
 
   config = mkIf cfg.enable (
+    let
+      settingsFragments = lib.filter (fragment: fragment != { }) (
+        if builtins.isList cfg.settings then cfg.settings else [ ]
+      );
+      renderedIniFragments = lib.filter (text: lib.match "[[:space:]]*" text == null) (
+        [ (lib.generators.toGitINI cfg.iniContent) ] ++ map lib.generators.toGitINI settingsFragments
+      );
+    in
     lib.mkMerge [
       {
-        home.packages = [ cfg.package ];
+        home.packages = lib.optionals (cfg.package != null) [ cfg.package ];
 
         assertions = [
-          {
-            assertion =
-              let
-                enabled = [
-                  cfg.delta.enable
-                  cfg.diff-so-fancy.enable
-                  cfg.difftastic.enable
-                  cfg.diff-highlight.enable
-                  cfg.riff.enable
-                  cfg.patdiff.enable
-                ];
-              in
-              lib.count lib.id enabled <= 1;
-            message = "Only one of 'programs.git.delta.enable' or 'programs.git.difftastic.enable' or 'programs.git.diff-so-fancy.enable' or 'programs.git.diff-highlight' or 'programs.git.patdiff' can be set to true at the same time.";
-          }
+          (
+            let
+              configOf =
+                {
+                  name,
+                  gitIntegrationOption ? [ "enableGitIntegration" ],
+                }:
+                {
+                  name = "programs.${name}.${lib.concatStringsSep "." gitIntegrationOption}";
+                  value =
+                    config.programs.${name}.enable && lib.getAttrFromPath gitIntegrationOption config.programs.${name};
+                };
+              enabled = builtins.filter (x: x.value) (
+                map configOf [
+                  { name = "delta"; }
+                  { name = "diff-highlight"; }
+                  { name = "diff-so-fancy"; }
+                  {
+                    name = "difftastic";
+                    gitIntegrationOption = [
+                      "git"
+                      "enable"
+                    ];
+                  }
+                  { name = "patdiff"; }
+                  { name = "riff"; }
+                ]
+              );
+            in
+            {
+              assertion = lib.length enabled <= 1;
+              message = ''
+                Only one of the following options can be enabled at a time.
+                  - ${lib.concatStringsSep "\n  - " (map (x: "`${x.name}'") enabled)}
+              '';
+            }
+          )
         ];
 
-        programs.git.iniContent.user = {
-          name = mkIf (cfg.userName != null) cfg.userName;
-          email = mkIf (cfg.userEmail != null) cfg.userEmail;
-        };
-
         xdg.configFile = {
-          "git/config".text = lib.generators.toGitINI cfg.iniContent;
+          "git/config".text = concatStringsSep "\n" renderedIniFragments;
 
           "git/ignore" = mkIf (cfg.ignores != [ ]) {
             text = concatStringsSep "\n" cfg.ignores + "\n";
@@ -564,7 +428,7 @@ in
       {
         programs.git.iniContent =
           let
-            hasSmtp = name: account: account.enable && account.smtp != null;
+            hasSmtp = _name: account: account.enable && account.smtp != null;
 
             genIdentity =
               name: account:
@@ -579,7 +443,7 @@ in
               lib.nameValuePair "sendemail.${name}" (
                 if account.msmtp.enable then
                   {
-                    sendmailCmd = "${pkgs.msmtp}/bin/msmtp";
+                    sendmailCmd = lib.getExe config.programs.msmtp.package;
                     envelopeSender = "auto";
                     from = "${realName} <${address}>";
                   }
@@ -606,11 +470,7 @@ in
       (mkIf (cfg.signing != { }) {
         programs.git = {
           signing = {
-            format =
-              if (lib.versionOlder config.home.stateVersion "25.05") then
-                (mkOptionDefault "openpgp")
-              else
-                (mkOptionDefault null);
+            format = mkOptionDefault signingFormatStateVersionDefault.effectiveDefault;
             signer =
               let
                 defaultSigners = {
@@ -640,6 +500,12 @@ in
         };
       })
 
+      (mkIf (cfg.signing.allowedSigners != "") {
+        xdg.configFile."git/allowed_signers".text = cfg.signing.allowedSigners;
+        programs.git.iniContent.gpg.ssh.allowedSignersFile =
+          mkDefault "${config.xdg.configHome}/git/allowed_signers";
+      })
+
       (mkIf (cfg.hooks != { }) {
         programs.git.iniContent = {
           core.hooksPath =
@@ -650,22 +516,8 @@ in
         };
       })
 
-      (mkIf (cfg.aliases != { }) { programs.git.iniContent.alias = cfg.aliases; })
-
-      (mkIf (lib.isAttrs cfg.extraConfig) {
-        programs.git.iniContent = cfg.extraConfig;
-      })
-
-      (mkIf (lib.isString cfg.extraConfig) {
-        warnings = [
-          ''
-            Using programs.git.extraConfig as a string option is
-            deprecated and will be removed in the future. Please
-            change to using it as an attribute set instead.
-          ''
-        ];
-
-        xdg.configFile."git/config".text = cfg.extraConfig;
+      (mkIf (!builtins.isList cfg.settings && cfg.settings != { }) {
+        programs.git.iniContent = cfg.settings;
       })
 
       (mkIf (cfg.includes != [ ]) {
@@ -687,17 +539,18 @@ in
       })
 
       (mkIf cfg.lfs.enable {
-        home.packages = [ pkgs.git-lfs ];
+        home.packages = lib.mkIf (cfg.lfs.package != null) [ cfg.lfs.package ];
 
         programs.git.iniContent.filter.lfs =
           let
             skipArg = lib.optional cfg.lfs.skipSmudge "--skip";
+            lfsPath = if cfg.lfs.package != null then lib.getExe cfg.lfs.package else "git-lfs";
           in
           {
-            clean = "git-lfs clean -- %f";
+            clean = "${lfsPath} clean -- %f";
             process = concatStringsSep " " (
               [
-                "git-lfs"
+                lfsPath
                 "filter-process"
               ]
               ++ skipArg
@@ -705,7 +558,7 @@ in
             required = true;
             smudge = concatStringsSep " " (
               [
-                "git-lfs"
+                lfsPath
                 "smudge"
               ]
               ++ skipArg
@@ -730,7 +583,7 @@ in
             Type = "oneshot";
             ExecStart =
               let
-                exe = lib.getExe cfg.package;
+                exe = if cfg.package != null then lib.getExe cfg.package else "git";
               in
               ''
                 "${exe}" for-each-repo --keep-going --config=maintenance.repo maintenance run --schedule=%i
@@ -767,7 +620,7 @@ in
         launchd.agents =
           let
             baseArguments = [
-              "${lib.getExe cfg.package}"
+              "${if cfg.package != null then lib.getExe cfg.package else "git"}"
               "for-each-repo"
               "--keep-going"
               "--config=maintenance.repo"
@@ -811,120 +664,6 @@ in
               };
             };
           };
-      })
-
-      (mkIf cfg.diff-highlight.enable {
-        programs.git.iniContent =
-          let
-            dhCommand = "${cfg.package}/share/git/contrib/diff-highlight/diff-highlight";
-          in
-          {
-            core.pager = "${dhCommand} | ${lib.getExe pkgs.less} ${lib.escapeShellArgs cfg.diff-highlight.pagerOpts}";
-            interactive.diffFilter = dhCommand;
-          };
-      })
-
-      (
-        let
-          difftCommand = "${lib.getExe cfg.difftastic.package} ${
-            lib.cli.toGNUCommandLineShell { } cfg.difftastic.options
-          }";
-        in
-        (lib.mkMerge [
-          (mkIf cfg.difftastic.enable {
-            home.packages = [ cfg.difftastic.package ];
-            programs.git.iniContent = {
-              diff.external = difftCommand;
-            };
-          })
-          (mkIf cfg.difftastic.enableAsDifftool {
-            home.packages = [ cfg.difftastic.package ];
-            programs.git.iniContent = {
-              diff = {
-                tool = lib.mkDefault "difftastic";
-              };
-              difftool = {
-                difftastic = {
-                  cmd = "${difftCommand} $LOCAL $REMOTE";
-                };
-              };
-            };
-          })
-        ])
-      )
-
-      (
-        let
-          deltaPackage = cfg.delta.package;
-          deltaCommand = "${deltaPackage}/bin/delta";
-        in
-        mkIf cfg.delta.enable {
-          home.packages = [ deltaPackage ];
-
-          programs.git.iniContent = {
-            core.pager = deltaCommand;
-            interactive.diffFilter = "${deltaCommand} --color-only";
-            delta = cfg.delta.options;
-          };
-        }
-      )
-
-      (mkIf cfg.diff-so-fancy.enable {
-        home.packages = [ pkgs.diff-so-fancy ];
-
-        programs.git.iniContent =
-          let
-            dsfCommand = "${pkgs.diff-so-fancy}/bin/diff-so-fancy";
-          in
-          {
-            core.pager = "${dsfCommand} | ${pkgs.less}/bin/less ${lib.escapeShellArgs cfg.diff-so-fancy.pagerOpts}";
-            interactive.diffFilter = "${dsfCommand} --patch";
-            diff-so-fancy = {
-              markEmptyLines = cfg.diff-so-fancy.markEmptyLines;
-              changeHunkIndicators = cfg.diff-so-fancy.changeHunkIndicators;
-              stripLeadingSymbols = cfg.diff-so-fancy.stripLeadingSymbols;
-              useUnicodeRuler = cfg.diff-so-fancy.useUnicodeRuler;
-              rulerWidth = mkIf (cfg.diff-so-fancy.rulerWidth != null) (cfg.diff-so-fancy.rulerWidth);
-            };
-          };
-      })
-
-      (
-        let
-          riffExe = baseNameOf (lib.getExe cfg.riff.package);
-        in
-        mkIf cfg.riff.enable {
-          home.packages = [ cfg.riff.package ];
-
-          # https://github.com/walles/riff/blob/b17e6f17ce807c8652bc59cd46758661d23ce358/README.md#usage
-          programs.git.iniContent = {
-            pager = {
-              diff = riffExe;
-              log = riffExe;
-              show = riffExe;
-            };
-
-            interactive.diffFilter = "${riffExe} --color=on";
-          };
-        }
-      )
-
-      (
-        let
-          patdiffPackage = cfg.patdiff.package;
-          patdiffCommand = "${lib.getExe' patdiffPackage "patdiff-git-wrapper"}";
-        in
-        mkIf cfg.patdiff.enable {
-          home.packages = [ patdiffPackage ];
-
-          programs.git.iniContent = {
-            diff.external = patdiffCommand;
-          };
-        }
-      )
-
-      (mkIf (cfg.riff.enable && cfg.riff.commandLineOptions != "") {
-        home.sessionVariables.RIFF = cfg.riff.commandLineOptions;
       })
     ]
   );

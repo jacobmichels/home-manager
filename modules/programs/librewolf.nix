@@ -34,7 +34,6 @@ in
       description = "LibreWolf is a privacy enhanced Firefox fork.";
       wrappedPackageName = "librewolf";
       unwrappedPackageName = "librewolf-unwrapped";
-      visible = true;
 
       platforms.linux = {
         configPath = ".librewolf";
@@ -49,12 +48,10 @@ in
     settings = lib.mkOption {
       type = with lib.types; attrsOf (either bool (either int str));
       default = { };
-      example = lib.literalExpression ''
-        {
-          "webgl.disabled" = false;
-          "privacy.resistFingerprinting" = false;
-        }
-      '';
+      example = {
+        "webgl.disabled" = false;
+        "privacy.resistFingerprinting" = false;
+      };
       description = ''
         Attribute set of global LibreWolf settings and overrides. Refer to
         <https://librewolf.net/docs/settings/>

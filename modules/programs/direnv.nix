@@ -23,6 +23,12 @@ let
 
 in
 {
+  meta.maintainers = with lib.maintainers; [
+    khaneliman
+    rycee
+    shikanime
+  ];
+
   imports = [
     (mkRenamedOptionModule
       [
@@ -38,12 +44,6 @@ in
       "nix-direnv"
       "enableFlakes"
     ] "Flake support is now always enabled.")
-  ];
-
-  meta.maintainers = with lib.maintainers; [
-    khaneliman
-    rycee
-    shikanime
   ];
 
   options.programs.direnv = {
@@ -75,34 +75,21 @@ in
 
     enableBashIntegration = lib.hm.shell.mkBashIntegrationOption { inherit config; };
 
-    enableFishIntegration =
-      lib.hm.shell.mkFishIntegrationOption {
-        inherit config;
-        extraDescription = ''
-          Note, enabling the direnv module will always activate its functionality
-          for Fish since the direnv package automatically gets loaded in Fish.
-          If this is not the case try adding
-
-          ```nix
-          environment.pathsToLink = [ "/share/fish" ];
-          ```
-
-          to the system configuration.
-        '';
-      }
-      // {
-        default = true;
-        readOnly = true;
-      };
+    enableFishIntegration = lib.hm.shell.mkFishIntegrationOption { inherit config; };
 
     enableNushellIntegration = lib.hm.shell.mkNushellIntegrationOption { inherit config; };
 
     enableZshIntegration = lib.hm.shell.mkZshIntegrationOption { inherit config; };
 
     nix-direnv = {
-      enable = mkEnableOption ''
-        [nix-direnv](https://github.com/nix-community/nix-direnv),
-        a fast, persistent use_nix implementation for direnv'';
+      enable =
+        mkEnableOption ''
+          [nix-direnv](https://github.com/nix-community/nix-direnv),
+          a fast, persistent use_nix implementation for direnv''
+        // {
+          default = true;
+          example = false;
+        };
 
       package = mkPackageOption pkgs "nix-direnv" { };
     };
@@ -112,7 +99,7 @@ in
         [mise](https://mise.jdx.dev/direnv.html),
         integration of use_mise for direnv'';
 
-      package = mkPackageOption pkgs "mise" { };
+      package = mkPackageOption pkgs "mise" { nullable = true; };
     };
 
     silent = mkEnableOption "silent mode, that is, disabling direnv logging";
@@ -146,7 +133,9 @@ in
           # Using `mkAfter` to make it more likely to appear after other
           # manipulations of the prompt.
           mkAfter ''
-            ${getExe cfg.package} hook fish | source
+            if not functions -q __direnv_export_eval
+              ${getExe cfg.package} hook fish | source
+            end
           ''
         );
 
@@ -163,9 +152,19 @@ in
               $env.config.hooks.pre_prompt?
               | default []
               | append {||
-                  ${getExe cfg.package} export json
-                  | from json --strict
-                  | default {}
+                  let direnv = (
+                      ${getExe cfg.package} export json
+                      | from json --strict
+                      | default {}
+                  )
+
+                  for key in ($direnv | columns) {
+                      if ($direnv | get $key) == null {
+                          hide-env --ignore-errors $key
+                      }
+                  }
+
+                  $direnv
                   | items {|key, value|
                       let value = do (
                           {
@@ -180,6 +179,7 @@ in
                       ) $value
                       return [ $key $value ]
                   }
+                  | where {|pair| $pair.1 != null }
                   | into record
                   | load-env
               }
@@ -200,7 +200,7 @@ in
 
         "direnv/lib/hm-mise.sh" = mkIf cfg.mise.enable {
           text = ''
-            eval "$(${getExe cfg.mise.package} direnv activate)"
+            eval "$(${if cfg.mise.package != null then getExe cfg.mise.package else "mise"} direnv activate)"
           '';
         };
       };

@@ -38,6 +38,7 @@ let
     pkgs.writeShellScript "activate-files" ''
       set -euo pipefail
       export HOME_MANAGER_BACKUP_EXT="" HOME_MANAGER_BACKUP_OVERWRITE=""
+      export HOME_MANAGER_BACKUP_COMMAND=""
       export VERBOSE_ARG=""
       oldGenPath="$1"
       newGenPath=${generation cfg}

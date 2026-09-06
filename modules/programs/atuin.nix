@@ -10,8 +10,21 @@ let
 
   tomlFormat = pkgs.formats.toml { };
 
-  inherit (lib) mkIf mkOption types;
-  inherit (pkgs.stdenv) isLinux isDarwin;
+  # atuin 18.13.0 deprecated `atuin daemon` in favour of `atuin daemon start`
+  daemonArgs =
+    if lib.versionAtLeast cfg.package.version "18.13.0" then
+      [
+        "daemon"
+        "start"
+      ]
+    else
+      [ "daemon" ];
+
+  inherit (lib)
+    mkIf
+    mkOption
+    types
+    ;
 in
 {
   meta.maintainers = with lib.maintainers; [
@@ -84,8 +97,22 @@ in
         Configuration written to
         {file}`$XDG_CONFIG_HOME/atuin/config.toml`.
 
-        See <https://docs.atuin.sh/configuration/config/> for the full list
+        See <https://docs.atuin.sh/latest/configuration/config/> for the full list
         of options.
+      '';
+    };
+
+    forceOverwriteSettings = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        When enabled, force overwriting of the Atuin configuration file
+        ({file}`$XDG_CONFIG_HOME/atuin/config.toml`).
+        Any existing Atuin configuration will be lost.
+
+        Enabling this is useful when adding settings for the first time
+        because Atuin writes its default config file after every single
+        shell command, which can make it difficult to manually remove.
       '';
     };
 
@@ -102,7 +129,7 @@ in
         {file}`$XDG_CONFIG_HOME/atuin/themes/theme-name.toml`
         where the name of each attribute is the theme-name
 
-        See <https://docs.atuin.sh/guide/theming/> for the full list
+        See <https://docs.atuin.sh/latest/guide/theming/> for the full list
         of options.
       '';
       default = { };
@@ -143,6 +170,14 @@ in
   config =
     let
       flagsStr = lib.escapeShellArgs cfg.flags;
+      atuinFishConfig =
+        pkgs.runCommand "atuin-fish-config.fish"
+          {
+            nativeBuildInputs = [ pkgs.writableTmpDirAsHomeHook ];
+          }
+          ''
+            ${lib.getExe cfg.package} init fish ${flagsStr} > "$out"
+          '';
     in
     mkIf cfg.enable (
       lib.mkMerge [
@@ -155,6 +190,7 @@ in
             (mkIf (cfg.settings != { }) {
               "atuin/config.toml" = {
                 source = tomlFormat.generate "atuin-config" cfg.settings;
+                force = cfg.forceOverwriteSettings;
               };
             })
 
@@ -188,11 +224,12 @@ in
           '';
 
           programs.fish.interactiveShellInit = mkIf cfg.enableFishIntegration ''
-            ${lib.getExe cfg.package} init fish ${flagsStr} | source
+            source ${atuinFishConfig}
           '';
 
           programs.nushell = mkIf cfg.enableNushellIntegration {
-            extraConfig = ''
+            # Load after fzf so Atuin keeps Ctrl-R in Nushell.
+            extraConfig = lib.mkOrder 2000 ''
               source ${
                 pkgs.runCommand "atuin-nushell-config.nu"
                   {
@@ -206,98 +243,79 @@ in
           };
         }
 
-        (mkIf daemonCfg.enable (
-          lib.mkMerge [
+        (mkIf config.home.preferXdgDirectories {
+          programs.atuin.settings.logs = {
+            dir = lib.mkDefault "${config.xdg.stateHome}/atuin/logs";
+          };
+        })
+
+        (mkIf daemonCfg.enable {
+          assertions = [
             {
-              assertions = [
-                {
-                  assertion = lib.versionAtLeast cfg.package.version "18.2.0";
-                  message = ''
-                    The Atuin daemon requires at least version 18.2.0 or later.
-                  '';
-                }
-                {
-                  assertion = isLinux || isDarwin;
-                  message = "The Atuin daemon can only be configured on either Linux or macOS.";
-                }
-              ];
-
-              programs.atuin.settings = {
-                daemon = {
-                  enabled = true;
-                };
-              };
+              assertion = config.systemd.user.enable || config.launchd.enable;
+              message = "The Atuin daemon can only be configured on systems with systemd or launchd.";
             }
-            (mkIf isLinux {
-              programs.atuin.settings = {
-                daemon = {
-                  systemd_socket = true;
-                };
-              };
+          ];
 
-              systemd.user.services.atuin-daemon = {
-                Unit = {
-                  Description = "Atuin daemon";
-                  Requires = [ "atuin-daemon.socket" ];
-                };
-                Install = {
-                  Also = [ "atuin-daemon.socket" ];
-                  WantedBy = [ "default.target" ];
-                };
-                Service = {
-                  ExecStart = "${lib.getExe cfg.package} daemon";
-                  Environment = lib.optionals (daemonCfg.logLevel != null) [ "ATUIN_LOG=${daemonCfg.logLevel}" ];
-                  Restart = "on-failure";
-                  RestartSteps = 3;
-                  RestartMaxDelaySec = 6;
-                };
-              };
+          programs.atuin.settings.daemon = {
+            enabled = true;
+            systemd_socket = config.systemd.user.enable;
+            socket_path = lib.mkIf (!config.systemd.user.enable) (
+              lib.mkDefault "${config.xdg.dataHome}/atuin/daemon.sock"
+            );
+          };
 
-              systemd.user.sockets.atuin-daemon =
-                let
-                  socket_dir = if lib.versionAtLeast cfg.package.version "18.4.0" then "%t" else "%D/atuin";
-                in
-                {
-                  Unit = {
-                    Description = "Atuin daemon socket";
-                  };
-                  Install = {
-                    WantedBy = [ "sockets.target" ];
-                  };
-                  Socket = {
-                    ListenStream = "${socket_dir}/atuin.sock";
-                    SocketMode = "0600";
-                    RemoveOnStop = true;
-                  };
-                };
-            })
-            (mkIf isDarwin {
-              programs.atuin.settings = {
-                daemon = {
-                  socket_path = lib.mkDefault "${config.xdg.dataHome}/atuin/daemon.sock";
-                };
-              };
+          systemd.user.services.atuin-daemon = {
+            Unit = {
+              Description = "Atuin daemon";
+              Requires = [ "atuin-daemon.socket" ];
+            };
+            Install = {
+              Also = [ "atuin-daemon.socket" ];
+              WantedBy = [ "default.target" ];
+            };
+            Service = {
+              ExecStart = "${lib.getExe cfg.package} ${lib.concatStringsSep " " daemonArgs}";
+              Environment = lib.optionals (daemonCfg.logLevel != null) [ "ATUIN_LOG=${daemonCfg.logLevel}" ];
+              Restart = "on-failure";
+              RestartSteps = 3;
+              RestartMaxDelaySec = 6;
+            };
+          };
 
-              launchd.agents.atuin-daemon = {
-                enable = true;
-                config = {
-                  ProgramArguments = [
-                    "${lib.getExe cfg.package}"
-                    "daemon"
-                  ];
-                  EnvironmentVariables = lib.optionalAttrs (daemonCfg.logLevel != null) {
-                    ATUIN_LOG = daemonCfg.logLevel;
-                  };
-                  KeepAlive = {
-                    Crashed = true;
-                    SuccessfulExit = false;
-                  };
-                  ProcessType = "Background";
-                };
+          systemd.user.sockets.atuin-daemon =
+            let
+              socket_dir = if lib.versionAtLeast cfg.package.version "18.4.0" then "%t" else "%D/atuin";
+            in
+            {
+              Unit = {
+                Description = "Atuin daemon socket";
               };
-            })
-          ]
-        ))
+              Install = {
+                WantedBy = [ "sockets.target" ];
+              };
+              Socket = {
+                ListenStream = "${socket_dir}/atuin.sock";
+                SocketMode = "0600";
+                RemoveOnStop = true;
+              };
+            };
+
+          launchd.agents.atuin-daemon = {
+            enable = true;
+            config = {
+              ProgramArguments = [ (lib.getExe cfg.package) ] ++ daemonArgs;
+              EnvironmentVariables = lib.optionalAttrs (daemonCfg.logLevel != null) {
+                ATUIN_LOG = daemonCfg.logLevel;
+              };
+              KeepAlive = {
+                Crashed = true;
+                SuccessfulExit = false;
+              };
+              ProcessType = "Background";
+            };
+          };
+        })
       ]
     );
 }

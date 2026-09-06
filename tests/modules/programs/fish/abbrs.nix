@@ -1,4 +1,3 @@
-{ config, ... }:
 {
   config = {
     programs.fish = {
@@ -39,12 +38,18 @@
           command = "git";
           expansion = "checkout";
         };
-        s = {
+        status = {
+          name = "s";
           command = [
             "git"
             "hg"
           ];
           expansion = "status";
+        };
+        show = {
+          name = "s";
+          command = "systemctl";
+          expansion = "show";
         };
         dotdot = {
           regex = "^\\.\\.+$";
@@ -79,6 +84,8 @@
           "abbr --add --command git -- co checkout"
         assertFileContains home-files/.config/fish/config.fish \
           "abbr --add --command git --command hg -- s status"
+        assertFileContains home-files/.config/fish/config.fish \
+          "abbr --add --command systemctl -- s show"
         assertFileContains home-files/.config/fish/config.fish \
           "abbr --add --function multicd --regex '^\.\.+$' -- dotdot"
       '';

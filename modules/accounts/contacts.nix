@@ -102,8 +102,8 @@ let
         };
 
         local = mkOption {
-          type = types.nullOr (localModule name);
-          default = null;
+          type = localModule name;
+          default = { };
           description = ''
             Local configuration for the contacts.
           '';
@@ -119,7 +119,7 @@ let
       };
 
       config = {
-        name = name;
+        inherit name;
       };
     };
 
@@ -141,6 +141,7 @@ in
         types.submodule [
           contactOpts
           (import ../programs/vdirsyncer/accounts.nix)
+          (import ../programs/pimsync/accounts.nix)
           (import ../programs/khal/accounts.nix)
           (import ../programs/khal/contact-accounts.nix)
         ]
