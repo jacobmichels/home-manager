@@ -371,6 +371,7 @@ def check(home, old, new):
                               file=sys.stderr)
             plan.append({"name": name, "before": state, "result": encode(result), "mode": mode,
                          "approval": approval, "local_notice": local_notice,
+                         "reconciler": str(Path(new) / "reconcile"),
                          "status_command": shlex.quote(str(Path(new) / "reconcile")) + " --check --verbose"})
         except (Divergence, OSError, ValueError) as error:
             raise Divergence(f"DIVERGENCE: {path}\n"
@@ -382,6 +383,7 @@ def check(home, old, new):
 def report_local_changes(home, plan, verbose=False):
     """Notification cache only: never consulted when deciding file contents."""
     known = 0
+    shown = 0
     for entry in plan:
         fingerprint = entry.get("local_notice")
         if fingerprint is None:
@@ -400,6 +402,23 @@ def report_local_changes(home, plan, verbose=False):
         print(f"LOCAL CHANGES: {target(home, entry['name'])}\n"
               "Preserving live edits that differ from the declarative configuration.",
               file=sys.stderr, flush=True)
+        shown += 1
+        if verbose:
+            command = shlex.quote(entry["reconciler"])
+            filename = shlex.quote(entry["name"])
+            print("  Keep local edits: no action required; the summary remains while contents differ.\n"
+                  "  Clear this notice by matching Nix to live: update the Nix declaration to generate these contents, then switch.\n"
+                  "  Or discard local edits and use the declared file (backs up and approves replacement):\n"
+                  f"    {command} --replace {filename}\n"
+                  "  To review a custom combination instead:\n"
+                  f"    {command} --export {filename}\n"
+                  f"    # Edit candidate in the printed workspace, then: {command} --accept WORKSPACE\n"
+                  "  After approval, run Home Manager activation to install it. If nix-swap skips Home Manager,\n"
+                  "  explicitly rerun its activation (on NixOS, restart your home-manager-USER.service).\n"
+                  "  Approval alone does not change the file or clear the notice. A custom candidate still\n"
+                  "  differing from the declaration will continue to appear in the local-change summary.\n"
+                  "  Applications may recreate local differences after writing their settings again.",
+                  file=sys.stderr)
         # Persist only after printing, outside preflight. Cache failures must
         # never fail reconciliation or suppress the next notification.
         temporary = None
@@ -421,7 +440,10 @@ def report_local_changes(home, plan, verbose=False):
                 os.unlink(temporary)
     if known:
         print(f"Reconciliation: {known} file(s) have previously reported local changes.", file=sys.stderr)
+    if (known or shown) and not verbose:
         print(f"Show files: {plan[0]['status_command']}", file=sys.stderr)
+        print("Local changes are informational, not conflicts. The command above shows how to keep or resolve them.",
+              file=sys.stderr)
 
 
 def apply(home, plan):
