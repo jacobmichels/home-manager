@@ -42,7 +42,10 @@ def resolution_guidance(old, new, name):
         f"        {shlex.quote(str(Path(new) / 'reconcile'))} --merge-declared {shlex.quote(name)}",
         "      Ambiguous alignment is refused; conflicting blocks are never discarded wholesale.",
         "      These commands back up the live file and approve only this exact file state for the next activation.",
-        "    Combine both: manually resolve the content and make the live file and declaration agree.",
+        "    Review a custom candidate without editing the live file:",
+        f"        {shlex.quote(str(Path(new) / 'reconcile'))} --export {shlex.quote(name)}",
+        "      Edit candidate in the printed workspace, then review and approve:",
+        f"        {shlex.quote(str(Path(new) / 'reconcile'))} --accept WORKSPACE",
         "  Fix any file-type, ownership, or permission issue reported above first; matching contents does not bypass these checks.",
         "  With no reconciled baseline, move a foreign file aside before retrying, even if its contents match.",
         "  Then rerun your usual Home Manager/NixOS activation command.",
@@ -238,8 +241,7 @@ def approved_result(home, name, state, base, desired):
     return None
 
 
-def resolve(home, old, new, filename, replace=False):
-    """Back up and approve one exact A/B/C state; activation installs the result."""
+def resolution_inputs(home, old, new, filename):
     name = os.path.relpath(filename, home) if os.path.isabs(filename) else filename
     path = target(home, name)
     if name not in manifest(old) or name not in manifest(new):
@@ -254,7 +256,18 @@ def resolve(home, old, new, filename, replace=False):
     base, desired = base_path.read_bytes(), desired_path.read_bytes()
     live = base64.b64decode(state["data"])
     validate_text(base, live, desired)
+    return name, state, base, live, desired
+
+
+def resolve(home, old, new, filename, replace=False):
+    """Back up and approve one exact A/B/C state; activation installs the result."""
+    name, state, base, live, desired = resolution_inputs(home, old, new, filename)
     result = desired if replace else merge(base, live, desired, prefer_declared=True)
+    approve_candidate(home, name, state, base, live, desired, result)
+
+
+def approve_candidate(home, name, state, base, live, desired, result):
+    path = target(home, name)
     receipt_path = approval_path(home, name)
     receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Validate an existing receipt too; never follow an unexpected symlink.
@@ -281,8 +294,73 @@ def resolve(home, old, new, filename, replace=False):
         if os.path.exists(temporary):
             os.unlink(temporary)
     print(f"Backup: {backup}\n"
-          f"Approved {'replacement' if replace else 'merge with declared conflicts winning'}: {path}\n"
+          f"Approved candidate: {path}\n"
           "The live file has not been changed. Rerun activation to install the approved result.")
+
+
+def export_conflict(home, old, new, filename):
+    name, state, base, live, desired = resolution_inputs(home, old, new, filename)
+    # Keep input snapshots outside the editable workspace. An agent editing the
+    # candidate must not accidentally redefine the inputs being approved.
+    root = target(home, ".local/state/home-manager/reconciliation/workspaces")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    workspace = Path(tempfile.mkdtemp(prefix="conflict-", dir=root))
+    metadata = {"name": name, "before": state, "base": digest(base),
+                "desired": digest(desired), "old": str(Path(old).resolve()),
+                "new": str(Path(new).resolve())}
+    for filename, data in (("base", base), ("live", live), ("declared", desired),
+                           ("candidate", live)):
+        with (workspace / filename).open("xb") as stream:
+            os.chmod(stream.fileno(), 0o600)
+            stream.write(data)
+    with workspace.with_suffix(".json").open("x") as stream:
+        os.chmod(stream.fileno(), 0o600)
+        json.dump(metadata, stream)
+    print(f"Conflict workspace: {workspace}\n"
+          "Edit candidate, then run reconcile --accept WORKSPACE to review and approve.\n"
+          "These files may contain secrets. Nothing has been sent to an agent.")
+    return workspace
+
+
+def accept_conflict(home, old, new, directory, confirm=None):
+    root = target(home, ".local/state/home-manager/reconciliation/workspaces")
+    workspace = Path(os.path.abspath(directory))
+    if workspace.parent != root or workspace.is_symlink() or not workspace.is_dir():
+        raise Divergence("Expected an exported conflict workspace, not a symlink or foreign directory.")
+    metadata_state = snapshot(workspace.with_suffix(".json"))
+    if metadata_state is None or "data" not in metadata_state:
+        raise Divergence("Missing regular workspace metadata.")
+    metadata = json.loads(base64.b64decode(metadata_state["data"]))
+    inputs = resolution_inputs(home, old, new, metadata["name"])
+    name, state, base, live, desired = inputs
+    if (metadata["old"] != str(Path(old).resolve()) or metadata["new"] != str(Path(new).resolve())
+            or metadata["before"] != state or metadata["base"] != digest(base)
+            or metadata["desired"] != digest(desired)):
+        raise Divergence("Conflict inputs changed. Export a fresh workspace and review again.")
+    candidate_state = snapshot(workspace / "candidate")
+    if candidate_state is None or "data" not in candidate_state:
+        raise Divergence("Candidate must be a regular file.")
+    candidate = base64.b64decode(candidate_state["data"])
+    validate_text(candidate)
+    print(f"Review candidate for {target(home, name)} (no format validation performed):")
+    # Escape controls so config contents cannot hide deletions with terminal
+    # escape sequences. repr also makes absent final newlines visible.
+    for line in difflib.unified_diff(live.decode().splitlines(keepends=True),
+                                     candidate.decode().splitlines(keepends=True),
+                                     fromfile="live", tofile="candidate"):
+        print(ascii(line))
+    if candidate == live:
+        print("No content differences.")
+    answer = (confirm or input)("Approve this exact candidate? Type yes: ")
+    if answer != "yes":
+        print("Declined. No backup or approval created; live file unchanged.")
+        return False
+    if (snapshot(workspace / "candidate") != candidate_state
+            or snapshot(workspace.with_suffix(".json")) != metadata_state
+            or resolution_inputs(home, old, new, name) != inputs):
+        raise Divergence("Inputs or candidate changed during review. Review again.")
+    approve_candidate(home, name, state, base, live, desired, candidate)
+    return True
 
 
 def check(home, old, new):
@@ -424,6 +502,8 @@ if __name__ == "__main__":
             choice.add_argument("--replace", action="store_true")
             choice.add_argument("--merge-declared", action="store_true")
             choice.add_argument("--check", action="store_true", help="read-only check of all reconciled files")
+            choice.add_argument("--export", action="store_true", help="export private A/B/C and candidate files")
+            choice.add_argument("--accept", action="store_true", help="review and approve an exported workspace")
             parser.add_argument("file", nargs="?", help="absolute path, or path relative to HOME")
             args = parser.parse_args(sys.argv[2:])
             if args.check and args.file is not None:
@@ -435,11 +515,14 @@ if __name__ == "__main__":
             old = state_home / "home-manager/gcroots/current-home"
             if args.check:
                 report_status(home, str(old.resolve()) if old.exists() else "", args.generation)
+            elif args.export or args.accept:
+                operation = export_conflict if args.export else accept_conflict
+                operation(home, str(old.resolve()) if old.exists() else "", args.generation, args.file)
             else:
                 resolve(home, str(old.resolve()) if old.exists() else "", args.generation,
                         args.file, replace=args.replace)
         else:
             raise ValueError("expected check or apply")
-    except (Divergence, OSError, ValueError) as error:
+    except (Divergence, OSError, ValueError, KeyError, EOFError) as error:
         print(error, file=sys.stderr)
         sys.exit(1)

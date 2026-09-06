@@ -2,6 +2,8 @@
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -402,6 +404,100 @@ class Reconciliation(unittest.TestCase):
                 self.assertEqual(r.snapshot(self.live), before)
                 self.assertFalse(r.approval_path(self.home, "config").exists())
                 self.assertEqual(list(self.home.glob("config.hm-backup-*")), [])
+
+    def candidate_workspace(self):
+        old = self.generation("old", b"size=20\n")
+        new = self.generation("new", b"size=30\n")
+        self.live.write_bytes(b"size=24\n# keep me\n")
+        workspace = r.export_conflict(self.home, old, new, "config")
+        return old, new, workspace
+
+    def test_export_and_accept_reviewed_candidate(self):
+        old, new, workspace = self.candidate_workspace()
+        before = r.snapshot(self.live)
+        self.assertEqual(workspace.stat().st_mode & 0o777, 0o700)
+        for filename, expected in (("base", b"size=20\n"), ("declared", b"size=30\n"),
+                                   ("live", self.live.read_bytes()), ("candidate", self.live.read_bytes())):
+            self.assertEqual((workspace / filename).read_bytes(), expected)
+            self.assertEqual((workspace / filename).stat().st_mode & 0o777, 0o600)
+        result = b"size=30\n# keep me\n# reviewed\n"
+        (workspace / "candidate").write_bytes(result)
+        self.assertTrue(r.accept_conflict(self.home, old, new, workspace, lambda _: "yes"))
+        self.assertEqual(r.snapshot(self.live), before)
+        receipt = json.loads(r.approval_path(self.home, "config").read_text())
+        self.assertEqual(Path(receipt["backup"]).read_bytes(), b"size=24\n# keep me\n")
+        self.activate(old, new)
+        self.assertEqual(self.live.read_bytes(), result)
+        self.assertFalse(r.approval_path(self.home, "config").exists())
+        with self.assertRaises(r.Divergence):
+            r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+
+    def test_candidate_declined_without_writes(self):
+        old, new, workspace = self.candidate_workspace()
+        before = r.snapshot(self.live)
+        self.assertFalse(r.accept_conflict(self.home, old, new, workspace, lambda _: "no"))
+        self.assertEqual(r.snapshot(self.live), before)
+        self.assertFalse(r.approval_path(self.home, "config").exists())
+        self.assertEqual(list(self.home.glob("config.hm-backup-*")), [])
+
+    def test_candidate_stale_live_or_generation_refused(self):
+        old, new, workspace = self.candidate_workspace()
+        other = self.generation("other", b"size=40\n")
+        with self.assertRaisesRegex(r.Divergence, "inputs changed"):
+            r.accept_conflict(self.home, old, other, workspace, lambda _: self.fail("must not prompt"))
+        self.live.write_bytes(b"new app changes\n")
+        with self.assertRaisesRegex(r.Divergence, "inputs changed"):
+            r.accept_conflict(self.home, old, new, workspace, lambda _: self.fail("must not prompt"))
+        self.assertEqual(self.live.read_bytes(), b"new app changes\n")
+        self.assertFalse(r.approval_path(self.home, "config").exists())
+
+    def test_candidate_changed_during_review_refused(self):
+        old, new, workspace = self.candidate_workspace()
+        def confirm(_):
+            (workspace / "candidate").write_bytes(b"not reviewed\n")
+            return "yes"
+        with self.assertRaisesRegex(r.Divergence, "changed during review"):
+            r.accept_conflict(self.home, old, new, workspace, confirm)
+        self.assertFalse(r.approval_path(self.home, "config").exists())
+        self.assertEqual(list(self.home.glob("config.hm-backup-*")), [])
+
+    def test_candidate_symlink_and_binary_refused(self):
+        old, new, workspace = self.candidate_workspace()
+        candidate = workspace / "candidate"
+        candidate.unlink()
+        candidate.symlink_to(self.live)
+        with self.assertRaises(r.Divergence):
+            r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+        candidate.unlink()
+        candidate.write_bytes(b"bad\0bytes")
+        with self.assertRaises(r.Divergence):
+            r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+        self.assertFalse(r.approval_path(self.home, "config").exists())
+
+    def test_candidate_cli_export_decline_and_accept(self):
+        old = self.generation("old", b"size=20\n")
+        new = self.generation("new", b"size=30\n")
+        self.live.write_bytes(b"size=24\n")
+        state_home = self.home / ".local/state"
+        gcroot = state_home / "home-manager/gcroots/current-home"
+        gcroot.parent.mkdir(parents=True)
+        gcroot.symlink_to(old)
+        command = [sys.executable, r.__file__, "resolve", "--generation", new]
+        env = dict(os.environ, HOME=str(self.home), XDG_STATE_HOME=str(state_home))
+        subprocess.run(command + ["--export", "config"], env=env, check=True, capture_output=True)
+        workspace = next((state_home / "home-manager/reconciliation/workspaces").glob("conflict-*/"))
+        (workspace / "candidate").write_bytes(b"size=30\n# retained\n")
+        declined = subprocess.run(command + ["--accept", str(workspace)], env=env,
+                                  input="no\n", text=True, capture_output=True, check=True)
+        self.assertIn("Declined", declined.stdout)
+        self.assertFalse(r.approval_path(self.home, "config").exists())
+        accepted = subprocess.run(command + ["--accept", str(workspace)], env=env,
+                                  input="yes\n", text=True, capture_output=True, check=True)
+        self.assertIn("-size=24", accepted.stdout)
+        self.assertIn("+size=30", accepted.stdout)
+        self.assertEqual(self.live.read_bytes(), b"size=24\n")
+        self.activate(old, new)
+        self.assertEqual(self.live.read_bytes(), b"size=30\n# retained\n")
 
     def test_old_merge_policy_approval_is_not_accepted(self):
         old = self.generation("old", b"size=15\n")

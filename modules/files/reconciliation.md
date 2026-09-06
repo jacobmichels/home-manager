@@ -126,6 +126,40 @@ and ambiguous insertion boundaries are refused instead of discarded. This is not
 setting-aware merge and can conservatively reject valid manual resolutions.
 Approvals produced by the older whole-block merge policy are no longer accepted.
 
+### Reviewed candidates (editor or agent)
+
+Use the desired generation's executable printed in the divergence guidance:
+
+```sh
+/nix/store/…-home-manager-generation/reconcile --export .config/ghostty/config
+# Edit the candidate file in the printed workspace; do not edit the live file.
+/nix/store/…-home-manager-generation/reconcile --accept /absolute/path/to/workspace
+```
+
+Export creates an owner-private workspace under
+`~/.local/state/home-manager/reconciliation/workspaces`, containing `base`,
+`live`, `declared`, and `candidate` (initially a copy of live). Input metadata
+is stored alongside the workspace, not inside it. Keep these files local unless
+you explicitly choose to share them: they may contain secrets. No agent is
+invoked and no data is uploaded. Give an agent only the workspace, not authority
+to accept candidates or edit live files. This separation is not a sandbox against
+processes running as your user.
+
+Acceptance displays every changed hunk from live to candidate, escaping terminal
+control characters and showing newline escapes. Type exactly `yes` to approve;
+any other answer declines without creating a backup or approval. Only UTF-8 text
+without NUL bytes is accepted; no application-specific syntax validation is
+performed. Human review authorizes the candidate, not a claim of semantic safety.
+
+The old/new generation identities and exact inputs must still match the export.
+Candidate and inputs are checked again after confirmation. Acceptance backs up
+live and records the exact reviewed bytes using the existing one-shot approval
+mechanism; normal activation installs them after its own input checks. Editing
+candidate after acceptance does not alter the approval. Workspaces are retained
+for inspection, including after decline; remove them yourself when no longer
+needed. The top-level `home-manager reconcile` CLI and agent UI are not yet
+implemented; use the generation-local executable above.
+
 Both commands create a unique, owner-only backup next to the live file and leave
 its contents untouched until activation. They write an approval under
 `~/.local/state/home-manager/reconciliation`, tied to the exact live snapshot
