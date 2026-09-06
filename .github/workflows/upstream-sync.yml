@@ -1,22 +1,21 @@
 name: Validate upstream sync
 
 on:
-  pull_request:
-    branches: [master]
+  push:
+    branches: [automation/upstream-sync]
 
 permissions:
   contents: read
 
 concurrency:
-  group: upstream-sync-validation-${{ github.event.pull_request.number }}
+  group: upstream-sync-validation
   cancel-in-progress: true
 
 jobs:
   validate:
     if: >-
       github.repository == 'jacobmichels/home-manager' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'automation/upstream-sync'
+      github.ref == 'refs/heads/automation/upstream-sync'
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
         with:

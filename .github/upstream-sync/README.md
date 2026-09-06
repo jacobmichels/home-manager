@@ -9,7 +9,8 @@ prompt, and tests are declared in Jacob's Strata configuration:
 
 Codex runs on the Pi using a dedicated ChatGPT subscription login. No OpenAI API
 key or ChatGPT login is stored in this repository's Actions secrets. GitHub Actions
-only performs Linux/macOS validation on PRs from `automation/upstream-sync`.
+only performs Linux/macOS validation on pushes to `automation/upstream-sync`.
+This also validates rebased candidates that cannot be merged into the old history.
 
 Routine updates auto-merge after both platform jobs succeed. A PR stays open if
 Git needed conflict resolution, Fish/automation/release files changed, modules
