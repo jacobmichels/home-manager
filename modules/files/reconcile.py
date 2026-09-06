@@ -5,17 +5,49 @@ must be quiescent during activation: POSIX has no compare-and-swap file replacem
 """
 
 import base64
+import argparse
 import difflib
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
+import shlex
 import sys
 import tempfile
 
 
 class Divergence(Exception):
     pass
+
+
+def resolution_guidance(old, new, name):
+    baseline = Path(old) / "home-files" / name if old else None
+    desired = Path(new) / "home-files" / name
+    lines = ["", "To resolve:",
+             "  Stop applications writing this file and back up the live file before editing."]
+    if baseline is not None and baseline.is_file():
+        lines += [f"  Previous generated file: {baseline}"]
+    else:
+        lines += ["  No previous generated file is available; existing files are not adopted automatically."]
+    if desired.is_file():
+        lines += [f"  New desired file: {desired}"]
+    lines += [
+        "  For content conflicts, choose one:",
+        "    Keep local edits: undo the conflicting Nix change, or update the declaration to match the live contents.",
+        "    Accept Nix: for an existing reconciled regular file, choose ONE:",
+        "      Replace the entire file with declared contents:",
+        f"        {shlex.quote(str(Path(new) / 'reconcile'))} --replace {shlex.quote(name)}",
+        "      Merge independent local edits; declared contents win conflicting diff hunks:",
+        f"        {shlex.quote(str(Path(new) / 'reconcile'))} --merge-declared {shlex.quote(name)}",
+        "      These commands back up the live file and approve only this exact file state for the next activation.",
+        "    Combine both: manually resolve the content and make the live file and declaration agree.",
+        "  Fix any file-type, ownership, or permission issue reported above first; matching contents does not bypass these checks.",
+        "  With no reconciled baseline, move a foreign file aside before retrying, even if its contents match.",
+        "  Then rerun your usual Home Manager/NixOS activation command.",
+        "  Failed activation does not advance the Home Manager baseline. Changing the live file or either generated version invalidates approval.",
+    ]
+    return "\n".join(lines)
 
 
 def encode(data):
@@ -71,7 +103,7 @@ def snapshot(path):
             "mtime": before.st_mtime_ns, "ctime": before.st_ctime_ns}
 
 
-def merge(base, live, desired):
+def merge(base, live, desired, prefer_declared=False):
     # Reject binary/non-UTF-8 inputs even when a byte comparison could succeed.
     for data in (base, live, desired):
         if b"\0" in data:
@@ -111,12 +143,85 @@ def merge(base, live, desired):
             # Adjacent replacements are independent. Insertions at the edge of
             # another edit are ambiguous and deliberately rejected.
             if max(i, k) < min(j, l) or (i == j and k <= i <= l) or (k == l and i <= k <= j):
-                raise Divergence("overlapping live and declarative edits")
+                if prefer_declared:
+                    subsumed.append((i, j, replacement))
+                else:
+                    raise Divergence("overlapping live and declarative edits")
     combined = left + [edit for edit in right if edit not in left]
     combined = [edit for edit in combined if edit not in subsumed]
     for i, j, replacement in sorted(combined, reverse=True):
         a[i:j] = replacement
     return b"".join(a)
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def approval_path(home, name):
+    return target(home, ".local/state/home-manager/reconciliation/"
+                  + digest(os.fsencode(name)) + ".json")
+
+
+def approved_result(home, name, state, base, desired):
+    receipt = snapshot(approval_path(home, name))
+    if receipt is None:
+        return None
+    if "data" not in receipt:
+        raise Divergence("resolution approval is not a regular file")
+    approval = json.loads(base64.b64decode(receipt["data"]))
+    if (approval.get("name") == name and approval.get("before") == state
+            and approval.get("base") == digest(base)
+            and approval.get("desired") == digest(desired)):
+        return approval
+    return None
+
+
+def resolve(home, old, new, filename, replace=False):
+    """Back up and approve one exact A/B/C state; activation installs the result."""
+    name = os.path.relpath(filename, home) if os.path.isabs(filename) else filename
+    path = target(home, name)
+    if name not in manifest(old) or name not in manifest(new):
+        raise Divergence("Explicit resolution requires an existing reconciled file in both generations.")
+    state = snapshot(path)
+    if state is None or "data" not in state or not state["mode"] & stat.S_IWUSR:
+        raise Divergence("Explicit resolution requires an owner-writable regular live file.")
+    base_path = Path(old) / "home-files" / name
+    desired_path = Path(new) / "home-files" / name
+    if os.access(base_path, os.X_OK) != os.access(desired_path, os.X_OK):
+        raise Divergence("Resolve executable-mode changes before accepting content changes.")
+    base, desired = base_path.read_bytes(), desired_path.read_bytes()
+    live = base64.b64decode(state["data"])
+    merged = merge(base, live, desired, prefer_declared=True)
+    result = desired if replace else merged
+    receipt_path = approval_path(home, name)
+    receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Validate an existing receipt too; never follow an unexpected symlink.
+    receipt_state = snapshot(receipt_path)
+    if receipt_state is not None and "data" not in receipt_state:
+        raise Divergence("resolution approval is not a regular file")
+    if snapshot(path) != state:
+        raise Divergence("Live file changed while preparing resolution. Retry with the application stopped.")
+    fd, backup = tempfile.mkstemp(prefix=path.name + ".hm-backup-", dir=path.parent)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(live)
+        stream.flush()
+        os.fsync(stream.fileno())
+    approval = {"name": name, "before": state, "base": digest(base),
+                "desired": digest(desired), "result": encode(result), "backup": backup}
+    fd, temporary = tempfile.mkstemp(prefix=".approval-", dir=receipt_path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(approval, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, receipt_path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print(f"Backup: {backup}\n"
+          f"Approved {'replacement' if replace else 'merge with declared conflicts winning'}: {path}\n"
+          "The live file has not been changed. Rerun activation to install the approved result.")
 
 
 def check(home, old, new):
@@ -125,6 +230,7 @@ def check(home, old, new):
     plan = []
     for name in sorted(previous | current):
         path = name
+        approval = None
         try:
             path = target(home, name)
             desired_path = Path(new) / "home-files" / name
@@ -159,8 +265,11 @@ def check(home, old, new):
                     raise Divergence("live file is not owner-writable")
                 base = base_path.read_bytes()
                 live = base64.b64decode(state["data"])
-                result = merge(base, live, desired)
-                if live != desired:
+                approval = approved_result(home, name, state, base, desired)
+                result = base64.b64decode(approval["result"]) if approval else merge(base, live, desired)
+                if approval:
+                    print(f"RESOLUTION APPROVED: {path}\nBackup: {approval['backup']}", file=sys.stderr)
+                if not approval and live != desired:
                     if result == live:
                         print(f"LOCAL CHANGES: {path}\n"
                               "Preserving live edits that differ from the declarative configuration.",
@@ -169,10 +278,12 @@ def check(home, old, new):
                         print(f"MERGE READY: {path}\n"
                               "Live edits and declarative changes merge cleanly; result will be installed during activation.",
                               file=sys.stderr)
-            plan.append({"name": name, "before": state, "result": encode(result), "mode": mode})
-        except (Divergence, OSError) as error:
+            plan.append({"name": name, "before": state, "result": encode(result), "mode": mode,
+                         "approval": approval})
+        except (Divergence, OSError, ValueError) as error:
             raise Divergence(f"DIVERGENCE: {path}\n"
-                             f"File was not modified. {error}") from error
+                             f"File was not modified. {error}"
+                             + resolution_guidance(old, new, name)) from error
     return plan
 
 
@@ -181,10 +292,12 @@ def apply(home, plan):
     for entry in plan:
         path = target(home, entry["name"])
         if snapshot(path) != entry["before"]:
-            raise Divergence(f"DIVERGENCE: {path}\nFile was not modified. Changed after preflight.")
+            raise Divergence(f"DIVERGENCE: {path}\nFile was not modified. Changed after preflight.\n"
+                             "Stop applications writing this file, inspect the live contents, and retry activation.")
     for entry in plan:
         before = entry["before"]
         if before is not None and before.get("data") == entry["result"]:
+            consume_approval(home, entry)
             continue
         path = target(home, entry["name"])
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,11 +309,23 @@ def apply(home, plan):
                 os.fchmod(stream.fileno(), entry["mode"])
                 os.fsync(stream.fileno())
             if snapshot(path) != before:
-                raise Divergence(f"DIVERGENCE: {path}\nFile was not modified. Changed after preflight.")
+                raise Divergence(f"DIVERGENCE: {path}\nFile was not modified. Changed after preflight.\n"
+                                 "Stop applications writing this file, inspect the live contents, and retry activation.\n"
+                                 "Earlier files may already have been installed.")
             os.replace(temporary, path)
+            consume_approval(home, entry)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+
+def consume_approval(home, entry):
+    if entry.get("approval"):
+        path = approval_path(home, entry["name"])
+        receipt = snapshot(path)
+        if receipt is not None and "data" in receipt:
+            if json.loads(base64.b64decode(receipt["data"])) == entry["approval"]:
+                path.unlink()
 
 
 if __name__ == "__main__":
@@ -215,8 +340,21 @@ if __name__ == "__main__":
         elif sys.argv[1] == "changed":
             entry = next(e for e in json.load(sys.stdin) if e["name"] == sys.argv[2])
             sys.exit(0 if (entry["before"] or {}).get("data") != entry["result"] else 1)
+        elif sys.argv[1] == "resolve":
+            parser = argparse.ArgumentParser(description="Back up and approve one file for reconciliation on the next activation.")
+            parser.add_argument("--generation", required=True)
+            choice = parser.add_mutually_exclusive_group(required=True)
+            choice.add_argument("--replace", action="store_true")
+            choice.add_argument("--merge-declared", action="store_true")
+            parser.add_argument("file", help="absolute path, or path relative to HOME")
+            args = parser.parse_args(sys.argv[2:])
+            home = os.environ["HOME"]
+            state_home = Path(os.environ.get("XDG_STATE_HOME", str(Path(home) / ".local/state")))
+            old = state_home / "home-manager/gcroots/current-home"
+            resolve(home, str(old.resolve()) if old.exists() else "", args.generation,
+                    args.file, replace=args.replace)
         else:
             raise ValueError("expected check or apply")
-    except (Divergence, OSError) as error:
+    except (Divergence, OSError, ValueError) as error:
         print(error, file=sys.stderr)
         sys.exit(1)

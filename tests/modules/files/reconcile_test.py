@@ -185,6 +185,52 @@ class Reconciliation(unittest.TestCase):
                     b"before\nsize=20\nafter\nseparator\ntheme=dark\n",
                     b"size=20\nseparator\ntheme=catppuccin\n")
 
+    def test_explicit_replace_and_merge_are_distinct(self):
+        base = b"size=14\nseparator\ntheme=light\n"
+        live = b"size=12\nseparator\ntheme=dark\n"
+        desired = b"size=20\nseparator\ntheme=light\n"
+        old = self.generation("old", base)
+        new = self.generation("new", desired)
+        for replace, expected in [(False, b"size=20\nseparator\ntheme=dark\n"),
+                                  (True, desired)]:
+            with self.subTest(replace=replace):
+                self.live.write_bytes(live)
+                r.resolve(self.home, old, new, "config", replace=replace)
+                self.assertEqual(self.live.read_bytes(), live)
+                receipt = json.loads(r.approval_path(self.home, "config").read_text())
+                self.assertEqual(Path(receipt["backup"]).read_bytes(), live)
+                self.activate(old, new)
+                self.assertEqual(self.live.read_bytes(), expected)
+                self.assertFalse(r.approval_path(self.home, "config").exists())
+                # Consumed approval cannot silently resolve a later edit.
+                self.live.write_bytes(live)
+                with self.assertRaises(r.Divergence):
+                    self.activate(old, new)
+
+    def test_resolution_is_bound_to_exact_inputs(self):
+        old = self.generation("old", b"size=14\n")
+        new = self.generation("new", b"size=20\n")
+        other = self.generation("other", b"size=22\n")
+        self.live.write_bytes(b"size=12\n")
+        r.resolve(self.home, old, new, str(self.live), replace=True)
+        with self.assertRaises(r.Divergence):
+            self.activate(old, other)
+        self.live.write_bytes(b"size=13\n")
+        with self.assertRaises(r.Divergence):
+            self.activate(old, new)
+        self.assertEqual(self.live.read_bytes(), b"size=13\n")
+
+    def test_resolution_rejects_foreign_and_symlink_files(self):
+        new = self.generation("new", b"size=20\n")
+        self.live.write_bytes(b"size=12\n")
+        with self.assertRaises(r.Divergence):
+            r.resolve(self.home, "", new, "config", replace=True)
+        old = self.generation("old", b"size=14\n")
+        self.live.unlink()
+        self.live.symlink_to(Path(old) / "home-files/config")
+        with self.assertRaises(r.Divergence):
+            r.resolve(self.home, old, new, "config", replace=True)
+
 
 if __name__ == "__main__":
     unittest.main()

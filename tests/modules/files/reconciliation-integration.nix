@@ -101,14 +101,33 @@ pkgs.runCommand "reconciliation-integration"
     rm "$HOME/write-boundary"
     if ${activate conflict} ${generation first} > "$TMPDIR/log" 2>&1; then exit 1; fi
     grep -q 'DIVERGENCE:.*config' "$TMPDIR/log"
+    grep -q 'Previous generated file:' "$TMPDIR/log"
+    grep -q 'New desired file:' "$TMPDIR/log"
+    grep -q 'Keep local edits:' "$TMPDIR/log"
+    grep -q 'Accept Nix:' "$TMPDIR/log"
+    grep -q 'Failed activation does not advance' "$TMPDIR/log"
     cmp "$HOME/config" "$TMPDIR/before"
     test "$(readlink "$HOME/static")" = "$(readlink "$TMPDIR/static-before")"
     test ! -e "$HOME/write-boundary"
+    # Use the exact generation-local command printed in divergence guidance.
+    mkdir -p "$HOME/.local/state/home-manager/gcroots"
+    ln -s ${generation first} "$HOME/.local/state/home-manager/gcroots/current-home"
+    ${generation conflict}/reconcile --merge-declared "$HOME/config"
+    cmp "$HOME/config" "$TMPDIR/before"
+    ${activate conflict} ${generation first}
+    cmp "$HOME/config" ${conflict.home-files}/config
+    ln -sfn ${generation conflict} "$HOME/.local/state/home-manager/gcroots/current-home"
+    echo 'local=kept' >> "$HOME/config"
+    ${generation first}/reconcile --replace config
+    grep -q 'local=kept' "$HOME/config"
+    ${activate first} ${generation conflict}
+    cmp "$HOME/config" ${first.home-files}/config
     # First activation must fail for a foreign file before any other file is linked.
     export HOME="$TMPDIR/foreign"
     mkdir "$HOME"
     echo foreign > "$HOME/config"
     if ${activate first} "" > "$TMPDIR/log" 2>&1; then exit 1; fi
+    grep -q 'No previous generated file is available' "$TMPDIR/log"
     grep -q foreign "$HOME/config"
     test ! -e "$HOME/write-boundary"
     test ! -e "$HOME/static"

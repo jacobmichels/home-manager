@@ -12,8 +12,8 @@ home.file.".config/foo/config" = {
 
 The shared file submodule also exposes this option through `xdg.configFile`
 and the other XDG file sets. It accepts individual UTF-8 text files only.
-`recursive` and `force` cannot be combined with reconciliation. There is no
-force-resolution command in this prototype.
+`recursive` and `force` cannot be combined with reconciliation. Each generation
+provides a `reconcile` command for explicit, one-shot content resolution.
 
 ## Architecture
 
@@ -85,7 +85,8 @@ the original line is absent. Ambiguous matches still fail.
 
 Removing and later re-adding a declaration does not recover its baseline: a
 remaining live file is foreign again. Manually moving it aside is the explicit
-resolution path. Backups and permanent `force` settings do not bypass conflicts.
+resolution path. Home Manager's ordinary backup settings and permanent `force`
+settings do not bypass conflicts.
 
 Both standalone `home-manager switch` and the NixOS Home Manager module execute
 the same activation package and use the current-generation GC root. This check
@@ -93,6 +94,45 @@ therefore applies in both modes. It does not make an entire NixOS system switch
 transactional, nor undo profile changes already performed by an external driver.
 
 ## Safety limits
+
+Divergence messages include the previous and new generated file paths and
+resolution guidance. Back up the live file before editing. To keep local edits,
+undo the conflicting declarative change or make the declaration match the live
+contents. To accept Nix, make the live file match the new desired contents. To
+combine changes manually, put the resolved contents in both the live file and
+the declaration, then reactivate. File-type, ownership, and permission failures
+must be resolved separately; matching contents does not override them. A foreign
+file without reconciled ownership must be moved aside before it can be managed.
+Failed activations do not advance the Home Manager baseline.
+
+For content conflicts on already reconciled regular files, the divergence output
+prints two exact commands bound to the desired generation:
+
+```sh
+/nix/store/…-home-manager-generation/reconcile --replace ~/.config/foo/config
+/nix/store/…-home-manager-generation/reconcile --merge-declared ~/.config/foo/config
+```
+
+Choose one, then rerun normal activation. `--replace` installs the entire declared
+file, discarding local additions. `--merge-declared` preserves non-conflicting
+local edits and uses the declared version for conflicting diff hunks. Nearby
+lines can belong to the same hunk; this is not a setting-aware merge.
+
+Both commands create a unique, owner-only backup next to the live file and leave
+its contents untouched until activation. They write an approval under
+`~/.local/state/home-manager/reconciliation`, tied to the exact live snapshot
+and hashes of both generated files. Activation consumes that approval when it
+installs the result. A changed live file or generated input makes approval
+inapplicable. There is no permanent override, no automatic activation, and no
+change to the previous-generation baseline. If activation fails later, a new
+explicit approval may be needed. Backups remain until the user removes them.
+
+The commands accept one absolute path or one path relative to HOME. They are
+available directly from the failed generation even if its Home Manager package
+has not been activated yet, in both standalone and NixOS usage. They do not
+bypass ownership, file-type, encoding, or executable-mode restrictions, and do
+not adopt foreign files. No global `home-manager reconcile` subcommand is added
+by this prototype.
 
 Applications must be quiescent during activation. Snapshots detect changes
 between planning and installation, with a final per-file check, but POSIX rename

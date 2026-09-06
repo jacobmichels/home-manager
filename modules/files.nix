@@ -35,6 +35,9 @@ let
     builtins.toJSON (map (f: f.target) reconciled)
   );
   reconcile = "${pkgs.python3}/bin/python3 ${./files/reconcile.py}";
+  resolveCommand = pkgs.writeShellScript "home-manager-reconcile" ''
+    exec ${reconcile} resolve --generation @generation@ "$@"
+  '';
   skipReconciled = lib.optionalString (reconciled != [ ]) ''
     case "$relativePath" in
       ${lib.concatMapStringsSep "|" (f: lib.escapeShellArg f.target) reconciled}) continue ;;
@@ -138,6 +141,8 @@ in
 
     home.extraBuilderCommands = ''
       ln -s ${reconciliationManifest} "$out/reconciliation.json"
+      substitute ${resolveCommand} "$out/reconcile" --subst-var-by generation "$out"
+      chmod +x "$out/reconcile"
     '';
 
     home.activation.checkReconciledFiles =
