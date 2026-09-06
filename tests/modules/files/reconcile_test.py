@@ -273,6 +273,97 @@ class Reconciliation(unittest.TestCase):
                                  b"theme=catppuccin\nsize=20\n", prefer_declared=True),
                          b"theme=catppuccin\nsize=20\n")
 
+    def test_shell_independent_function_edits(self):
+        base = (b'#!/bin/sh\nprepare() {\n  echo "preparing"\n}\n\n'
+                b'finish() {\n  echo "done"\n}\nprepare\nfinish\n')
+        live = base.replace(b'echo "preparing"', b'# local instrumentation\n  echo "starting"')
+        desired = base.replace(b'echo "done"', b'printf "%s\\n" "finished"')
+        old = self.generation("old", base)
+        new = self.generation("new", desired)
+        self.live.write_bytes(live)
+        self.activate(old, new)
+        self.assertEqual(self.live.read_bytes(),
+                         live.replace(b'echo "done"', b'printf "%s\\n" "finished"'))
+
+    def test_shell_declared_resolution_preserves_comments_commands_and_mode(self):
+        base = b'#!/bin/sh\nMODE="default"\nexec worker "$MODE"\n'
+        live = (b'#!/bin/sh\n# Keep my diagnostics\nset -x\nMODE="local"\n'
+                b'printf "%s\\n" "$MODE" >&2\nexec worker "$MODE"\n')
+        desired = base.replace(b'"default"', b'"production"')
+        old = self.generation("old", base)
+        new = self.generation("new", desired)
+        for generation in (old, new):
+            (Path(generation) / "home-files/config").chmod(0o755)
+        self.live.write_bytes(live)
+        self.live.chmod(0o700)
+        before = r.snapshot(self.live)
+        with self.assertRaises(r.Divergence):
+            self.activate(old, new)
+        self.assertEqual(r.snapshot(self.live), before)
+        r.resolve(self.home, old, new, "config")
+        self.assertEqual(r.snapshot(self.live), before)
+        receipt = json.loads(r.approval_path(self.home, "config").read_text())
+        self.assertEqual(Path(receipt["backup"]).read_bytes(), live)
+        self.activate(old, new)
+        self.assertEqual(self.live.read_bytes(), live.replace(b'"local"', b'"production"'))
+        self.assertEqual(self.live.stat().st_mode & 0o777, 0o700)
+
+    def test_shell_quoted_heredoc_preserves_literal_content(self):
+        base = (b"#!/bin/sh\ncat <<'EOF'\n$HOME is literal\n"
+                b"$(do_not_execute)\nEOF\n\necho done\n")
+        live = base.replace(b'$HOME is literal', b'$HOME and `commands` stay literal')
+        desired = base.replace(b'echo done', b'echo finished')
+        self.assertEqual(r.merge(base, live, desired),
+                         live.replace(b'echo done', b'echo finished'))
+
+    def test_shell_continuation_and_no_final_newline(self):
+        base = (b'#!/bin/sh\nworker \\\n  --mode default \\\n  --verbose\n\n'
+                b'printf "%s" "done"')
+        live = base.replace(b'--mode default', b'--mode "local value"')
+        desired = base.replace(b'"done"', b'"finished"')
+        self.assertEqual(r.merge(base, live, desired),
+                         live.replace(b'"done"', b'"finished"'))
+
+    def test_shell_ambiguous_resolution_leaves_everything_untouched(self):
+        # These are text fixtures, never executed. Both ordinary activation and
+        # declared-preferred resolution must refuse ambiguous overlapping hunks.
+        cases = {
+            "shared value prefix does not identify local assignment": (
+                b'MODE="default"\n', b'# local comment\nMODE="local"\naudit\n',
+                b'MODE="declared"\n'),
+            "repeated assignments": (
+                b'MODE=default\n', b'MODE=local\nMODE=override\n', b'MODE=declared\n'),
+            "competing inserted commands": (
+                b'echo ready\n', b'local_hook\necho ready\n',
+                b'declared_hook\necho ready\n'),
+            "rewritten conditional with local command": (
+                b'if test -f old; then\n  old_command\nfi\n',
+                b'if test -f local; then\n  local_command\n  audit\nfi\n',
+                b'if test -f declared; then\n  declared_command\nfi\n'),
+            "heredoc rewritten with extra local content": (
+                b"cat <<'EOF'\nred\nyellow\nEOF\n",
+                b"cat <<'EOF'\ngreen\nkeep this\norange\nEOF\n",
+                b"cat <<'EOF'\nblue\npurple\nEOF\n"),
+            "continued command rewritten with local argument": (
+                b'worker \\\n  --first old \\\n  --second old\n',
+                b'worker \\\n  --first local \\\n  --keep-me \\\n  --second local\n',
+                b'worker \\\n  --first declared \\\n  --second declared\n'),
+        }
+        for index, (name, (base, live, desired)) in enumerate(cases.items()):
+            with self.subTest(name=name):
+                old = self.generation(f"old-{index}", b'#!/bin/sh\n' + base)
+                new = self.generation(f"new-{index}", b'#!/bin/sh\n' + desired)
+                self.live.write_bytes(b'#!/bin/sh\n' + live)
+                before = r.snapshot(self.live)
+                with self.assertRaises(r.Divergence):
+                    self.activate(old, new)
+                self.assertEqual(r.snapshot(self.live), before)
+                with self.assertRaises(r.Divergence):
+                    r.resolve(self.home, old, new, "config")
+                self.assertEqual(r.snapshot(self.live), before)
+                self.assertFalse(r.approval_path(self.home, "config").exists())
+                self.assertEqual(list(self.home.glob("config.hm-backup-*")), [])
+
     def test_old_merge_policy_approval_is_not_accepted(self):
         old = self.generation("old", b"size=15\n")
         new = self.generation("new", b"size=20\n")
