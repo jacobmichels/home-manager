@@ -106,6 +106,14 @@ class MergeTests(unittest.TestCase):
         merge.assert_not_called()
         self.assertEqual(self.result()["status"], "pending")
 
+    def test_decision_issue_accepts_cli_bot_identity_but_not_other_authors(self):
+        for login in ("app/github-actions", "github-actions[bot]", "someone-else"):
+            with self.subTest(login=login):
+                issue = {"number": 2, "title": sync.ISSUE_TITLE, "body": sync.MARKER,
+                         "author": {"login": login}}
+                with patch.object(sync, "gh", return_value=json.dumps([issue])):
+                    self.assertEqual(sync.find_issue(), issue if login in sync.BOT_LOGINS else None)
+
     def test_failed_validation_creates_draft_and_preserves_body_newlines(self):
         data = self.divergent()
         sync.finish(self.repo, self.state)

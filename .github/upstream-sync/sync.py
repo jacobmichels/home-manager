@@ -12,6 +12,8 @@ UPSTREAM = "https://github.com/nix-community/home-manager.git"
 BRANCH = "automation/upstream-sync"
 ISSUE_TITLE = "Upstream sync needs a decision"
 MARKER = "<!-- home-manager-upstream-sync -->"
+# gh formats GraphQL Bot authors as app/<login>; webhooks use <login>[bot].
+BOT_LOGINS = {"app/github-actions", "github-actions[bot]"}
 
 
 def run(*args, cwd=None, check=True):
@@ -83,7 +85,7 @@ def prepare(repo, state):
     pair = f"{data['base']}:{upstream}"
     if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and any(
         issue["title"] == ISSUE_TITLE and MARKER in issue["body"] and pair in issue["body"]
-        and issue["author"]["login"] == "github-actions[bot]" for issue in issues
+        and issue["author"]["login"] in BOT_LOGINS for issue in issues
     ):
         save(state, {"status": "waiting"})
         return
@@ -133,7 +135,7 @@ def find_issue():
     issues = json.loads(gh("issue", "list", "-R", REPOSITORY, "--state", "open", "--limit", "100",
                            "--json", "number,title,body,author"))
     return next((i for i in issues if i["title"] == ISSUE_TITLE and MARKER in i["body"]
-                 and i["author"]["login"] == "github-actions[bot]"), None)
+                 and i["author"]["login"] in BOT_LOGINS), None)
 
 
 def publish(repo, state):
