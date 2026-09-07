@@ -30,6 +30,20 @@ let
     in
     sortedFiles;
 
+  reconciled = lib.filter (f: f.reconciliation.enable) cfg;
+  reconciliationManifest = pkgs.writeText "home-manager-reconciliation.json" (
+    builtins.toJSON (map (f: f.target) reconciled)
+  );
+  reconcile = "${pkgs.python3}/bin/python3 ${./files/reconcile.py}";
+  resolveCommand = pkgs.writeShellScript "home-manager-reconcile" ''
+    exec ${reconcile} resolve --generation @generation@ "$@"
+  '';
+  skipReconciled = lib.optionalString (reconciled != [ ]) ''
+    case "$relativePath" in
+      ${lib.concatMapStringsSep "|" (f: lib.escapeShellArg f.target) reconciled}) continue ;;
+    esac
+  '';
+
   inherit (config.home) fileOverlapResolution homeDirectory;
 
   inherit
@@ -119,7 +133,23 @@ in
                 }'';
         }
       )
-    ];
+    ]
+    ++ map (f: {
+      assertion = !f.recursive && !f.force;
+      message = "Reconciled file ${f.target} cannot use recursive or force.";
+    }) reconciled;
+
+    home.extraBuilderCommands = ''
+      ln -s ${reconciliationManifest} "$out/reconciliation.json"
+      substitute ${resolveCommand} "$out/reconcile" --subst-var-by generation "$out"
+      chmod +x "$out/reconcile"
+    '';
+
+    home.activation.checkReconciledFiles =
+      lib.hm.dag.entryBefore [ "writeBoundary" "checkFilesChanged" ]
+        ''
+          reconciliationPlan="$(${reconcile} check "$HOME" "''${oldGenPath:-}" "$newGenPath")" || exit 1
+        '';
 
     #  Using this function it is possible to make `home.file` create a
     #  symlink to a path outside the Nix store. For example, a Home Manager
@@ -152,6 +182,7 @@ in
         check = pkgs.replaceVars ./files/check-link-targets.sh {
           inherit (config.lib.bash) initHomeManagerLib;
           inherit forcedPaths storeDir;
+          inherit skipReconciled;
         };
       in
       ''
@@ -203,6 +234,7 @@ in
           declare -a slowSources=()
           for sourcePath in "$@" ; do
             relativePath="''${sourcePath#$newGenFiles/}"
+            ${skipReconciled}
             targetPath="$HOME/$relativePath"
             if [[ -L "''${targetPath%/*}" ]] ; then
               # The parent directory is itself a symlink (e.g. a stale
@@ -312,8 +344,15 @@ in
           homeFilePattern="$(readlink -e ${lib.escapeShellArg builtins.storeDir})/*-home-manager-files/*"
 
           newGenFiles="$1"
-          shift 1
+          declare -A oldReconciled=()
+          while IFS= read -r -d "" name; do
+            oldReconciled["$name"]=1
+          done < <(${reconcile} list "$2")
+          shift 2
           for relativePath in "$@" ; do
+            if [[ -v oldReconciled["$relativePath"] ]]; then
+              continue
+            fi
             targetPath="$HOME/$relativePath"
             if [[ -e "$newGenFiles/$relativePath" ]] ; then
               verboseEcho "Checking $targetPath: exists"
@@ -366,9 +405,12 @@ in
           # generation. The find command below will print the
           # relative path of the entry.
           find "$oldGenFiles" '(' -type f -or -type l ')' -printf '%P\0' \
-            | xargs -0 bash ${cleanup} "$newGenFiles"
+            | xargs -0 bash ${cleanup} "$newGenFiles" "$oldGenPath"
         }
 
+        if [[ ! -v DRY_RUN ]]; then
+          ${reconcile} apply "$HOME" <<< "$reconciliationPlan" || exit 1
+        fi
         cleanOldGen
         linkNewGen
       ''
@@ -394,11 +436,18 @@ in
           sourceArg = lib.escapeShellArg (sourceStorePath v);
           targetArg = lib.escapeShellArg v.target;
         in
-        ''
-          _cmp ${sourceArg} ${homeDirArg}/${targetArg} \
-            && changedFiles[${targetArg}]=0 \
-            || changedFiles[${targetArg}]=1
-        ''
+        if v.reconciliation.enable then
+          ''
+            ${reconcile} changed ${targetArg} <<< "$reconciliationPlan" \
+              && changedFiles[${targetArg}]=1 \
+              || changedFiles[${targetArg}]=0
+          ''
+        else
+          ''
+            _cmp ${sourceArg} ${homeDirArg}/${targetArg} \
+              && changedFiles[${targetArg}]=0 \
+              || changedFiles[${targetArg}]=1
+          ''
       ) (lib.filter (v: v.onChange != "") cfg)
       + ''
         unset -f _cmp
@@ -501,6 +550,12 @@ in
               local executable="$3"
               local recursive="$4"
               local ignorelinks="$5"
+              local reconciled="$6"
+
+              if [[ $reconciled && ! -f $source ]]; then
+                echo "Reconciliation requires a regular file: $relTarget" >&2
+                exit 1
+              fi
 
               # If the target has already been seen then we have a collision. Note, this
               # should not happen due to the assertion found in the 'files' module.
@@ -562,7 +617,12 @@ in
                   ln -s "$source" "$target"
                 fi
               else
-                insertFileEntry "$source" "$target" "$executable"
+                if [[ $reconciled ]]; then
+                  cp "$source" "$target"
+                  setExecutableBit "$target" "$executable"
+                else
+                  insertFileEntry "$source" "$target" "$executable"
+                fi
               fi
             }
           ''
@@ -575,6 +635,7 @@ in
                   (if v.executable == null then "inherit" else toString v.executable)
                   (toString v.recursive)
                   (toString v.ignorelinks)
+                  (toString v.reconciliation.enable)
                 ]
               }
             '') cfg

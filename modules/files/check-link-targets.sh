@@ -45,6 +45,7 @@ function checkCollision() {
 declare -a linkTargets=() linkSources=()
 for sourcePath in "$@" ; do
   relativePath="${sourcePath#$newGenFiles/}"
+  @skipReconciled@
   targetPath="$HOME/$relativePath"
 
   forced=""

@@ -142,6 +142,19 @@ in
                 link.
               '';
             };
+
+            reconciliation.enable = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                Materialize this file as a writable regular file and reconcile
+                live edits with the previous and new generated contents. Conflicts
+                abort activation before its write boundary. Only individual text
+                files are supported; recursive and force must be false.
+                Removing the declaration preserves the live file. Returning to
+                symlink management requires manually moving the live file aside.
+              '';
+            };
           };
 
           config = {
