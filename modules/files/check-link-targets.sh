@@ -12,6 +12,7 @@ newGenFiles="$1"
 shift
 for sourcePath in "$@" ; do
   relativePath="${sourcePath#$newGenFiles/}"
+  @skipReconciled@
   targetPath="$HOME/$relativePath"
 
   forced=""
