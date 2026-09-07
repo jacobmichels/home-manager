@@ -15,6 +15,24 @@ and the other XDG file sets. It accepts individual UTF-8 text files only.
 `recursive` and `force` cannot be combined with reconciliation. Each generation
 provides a `reconcile` command for explicit, one-shot content resolution.
 
+To make reconciliation the default, including module-generated files:
+
+```nix
+home.fileReconciliation.enable = true;
+xdg.configFile."some-app/static".reconciliation.enable = false;
+home.fileReconciliation.exclude = [ ".local/share/some-directory" ];
+```
+
+Exclusions are exact HOME-relative target paths, not file attribute names or
+globs. They change the default only; an explicit per-file `true` still wins.
+Nonempty exclusions are reported during evaluation. The default is strict:
+unsupported files do not silently fall back to symlinks. Audit directories,
+binary sources, recursive/force entries, and structural links such as systemd
+`.wants` links before opting in globally. Build and run the desired generation's
+`reconcile --check` before switching. Existing managed symlinks migrate at
+activation; unexpected live files still cause divergence. Disabling the global
+default later does not automatically convert writable files back to symlinks.
+
 ## Architecture
 
 This prototype targets checkout c53e65ec (2025-10-14). Current upstream has
