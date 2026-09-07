@@ -71,6 +71,7 @@ let
     pkgs.writeShellScript "activate-files" ''
       set -euo pipefail
       export HOME_MANAGER_BACKUP_EXT="" HOME_MANAGER_BACKUP_OVERWRITE=""
+      export HOME_MANAGER_BACKUP_COMMAND=""
       export VERBOSE_ARG=""
       oldGenPath="$1"
       newGenPath=${generation cfg}
@@ -81,6 +82,9 @@ let
       run touch "$HOME/write-boundary"
       ${cfg.home.activation.linkGeneration.data}
       ${cfg.home.activation.onFilesChange.data}
+      if [[ ! -v DRY_RUN ]]; then
+        ${pkgs.python3}/bin/python3 ${../../../modules/files/reconcile.py} finish "$HOME" <<< "$reconciliationPlan"
+      fi
     '';
 in
 assert global.home.file.config.reconciliation.enable;
@@ -129,9 +133,10 @@ pkgs.runCommand "reconciliation-integration"
     sed -i 's/theme=light/theme=dark/' "$HOME/config"
     ${activate second} ${generation second} 2> "$TMPDIR/notices"
     grep -q 'LOCAL CHANGES:.*config' "$TMPDIR/notices"
-    # Report persistent local edits again on the next activation.
+    # Summarize previously reported local edits on the next activation.
     ${activate second} ${generation second} 2> "$TMPDIR/notices"
-    grep -q 'LOCAL CHANGES:.*config' "$TMPDIR/notices"
+    grep -q '1 file(s) have previously reported local changes' "$TMPDIR/notices"
+    if grep -q 'LOCAL CHANGES:' "$TMPDIR/notices"; then exit 1; fi
     test ! -e "$HOME/hook-ran"
     grep -q 'theme=dark' "$HOME/config"
     # Roll back the independent font edit, preserving the application's theme.
