@@ -26,6 +26,39 @@ let
   conflict = make "theme=catppuccin\nfont=16\n" true;
   immutable = make "theme=light\nfont=14\n" false;
   removed = make null false;
+  global = (import ../../../modules {
+    inherit pkgs;
+    configuration = {
+      home.username = "hm-test";
+      home.homeDirectory = "/homeless-shelter";
+      home.stateVersion = "25.05";
+      manual.manpages.enable = false;
+      home.fileReconciliation.enable = true;
+      home.fileReconciliation.exclude = [ ".config/global/excluded" ".config/global/reopted" ];
+      home.file.config.text = "global default\n";
+      home.file."./normalized".text = "normalized target\n";
+      home.file.static = {
+        text = "opt out\n";
+        reconciliation.enable = false;
+      };
+      xdg.configFile."global/config".text = "xdg default\n";
+      xdg.configFile."global/excluded".text = "excluded\n";
+      xdg.configFile."global/reopted" = {
+        text = "explicit opt in beats exclusion\n";
+        reconciliation.enable = true;
+      };
+      xdg.configFile."global/static" = {
+        text = "xdg opt out\n";
+        reconciliation.enable = false;
+      };
+      programs.ghostty = {
+        enable = true;
+        package = null;
+        systemd.enable = false;
+        settings.font-size = 20;
+      };
+    };
+  }).config;
   generation =
     cfg:
     pkgs.runCommand "reconciliation-test-generation" { } ''
@@ -50,6 +83,14 @@ let
       ${cfg.home.activation.onFilesChange.data}
     '';
 in
+assert global.home.file.config.reconciliation.enable;
+assert global.home.file."./normalized".target == "normalized";
+assert !global.home.file.static.reconciliation.enable;
+assert global.xdg.configFile."global/config".reconciliation.enable;
+assert !global.xdg.configFile."global/static".reconciliation.enable;
+assert global.xdg.configFile."ghostty/config".reconciliation.enable;
+assert !global.xdg.configFile."global/excluded".reconciliation.enable;
+assert global.xdg.configFile."global/reopted".reconciliation.enable;
 pkgs.runCommand "reconciliation-integration"
   {
     nativeBuildInputs = [
@@ -149,5 +190,16 @@ pkgs.runCommand "reconciliation-integration"
     ln -s ${immutable.home-files}/config "$HOME/config"
     ${activate removed} ${generation first}
     test -L "$HOME/config"
+    export HOME="$TMPDIR/global"
+    mkdir "$HOME"
+    ${activate global} ""
+    test -f "$HOME/config" && test ! -L "$HOME/config"
+    test -w "$HOME/config"
+    test -L "$HOME/static"
+    test -f "$HOME/.config/global/config" && test ! -L "$HOME/.config/global/config"
+    test -L "$HOME/.config/global/static"
+    test -L "$HOME/.config/global/excluded"
+    test ! -L "$HOME/.config/global/reopted"
+    test -f "$HOME/.config/ghostty/config" && test ! -L "$HOME/.config/ghostty/config"
     touch "$out"
   ''
