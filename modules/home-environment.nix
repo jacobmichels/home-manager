@@ -876,6 +876,12 @@ in
               run rm $VERBOSE_ARG "$legacyGenGcPath"
             fi
           ''}
+
+          # Reconciliation artifacts become disposable only after all hooks and
+          # the current-generation update have succeeded.
+          if [[ ! -v DRY_RUN && -v reconciliationPlan ]]; then
+            ${pkgs.python3}/bin/python3 ${./files/reconcile.py} finish "$HOME" <<< "$reconciliationPlan"
+          fi
         '';
       in
       pkgs.runCommand "home-manager-generation"
