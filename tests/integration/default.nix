@@ -14,6 +14,7 @@ let
     };
 
   tests = lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+    files-reconciliation = import ../modules/files/reconciliation-integration.nix { inherit pkgs; };
     home-with-symbols = runTest ./standalone/home-with-symbols.nix;
     kitty = runTest ./standalone/kitty.nix;
     mu = runTest ./standalone/mu;
