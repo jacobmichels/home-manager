@@ -24,6 +24,8 @@ let
       (import ../../lib/file-type.nix {
         inherit (config.home) homeDirectory;
         inherit lib pkgs;
+        reconciliationDefault = config.home.fileReconciliation.enable;
+        reconciliationExcludedTargets = config.home.fileReconciliation.exclude;
       })
     )
     fileType
