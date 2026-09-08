@@ -87,9 +87,23 @@ otherwise the combined document is serialized as compact JSON with a final newli
 First-time creation and symlink migration validate JSON too. Existing regular
 files can be adopted without a generated baseline, as described below.
 
+Targets ending in `.toml` (including `.codex/config.toml`) automatically use
+three-way TOML merging. Tables merge recursively by key, with the same addition,
+deletion, and conflict rules as JSON objects. Arrays, including arrays of tables,
+are whole values: different concurrent changes conflict. Booleans, integers,
+and floats remain distinct. TOML dates, times, infinities, and NaNs are supported;
+NaNs compare equal for reconciliation.
+
+The helper uses `tomlkit` to edit the live document, retaining comments and
+formatting on surviving entries. New or replaced values use the serializer's
+formatting. Comment and whitespace changes alone do not conflict; live formatting
+wins. All inputs must be valid TOML, including on creation, symlink migration,
+and adoption. Invalid TOML and duplicate keys fail without falling back to text.
+Conflict messages identify the key using JSON pointer notation, without values.
+
 Other targets use line edit ranges against A, without producing conflict markers.
 The target filename selects the strategy, not the source filename or contents;
-`.jsonc` and `.json.backup` targets still use text merging.
+`.jsonc`, `.json.backup`, and `.toml.backup` targets still use text merging.
 Newly observed local differences report `LOCAL CHANGES` on stderr.
 A clean combination of live and declarative edits
 reports `MERGE READY` during preflight; installation follows at the write phase.
@@ -118,7 +132,7 @@ the original line is absent. Ambiguous matches still fail.
 ## Adoption without a baseline
 
 An existing owner-writable regular file does not need a previous generated file.
-With no reconciled baseline, JSON objects combine independent keys recursively;
+With no reconciled baseline, JSON objects and TOML tables combine independent keys recursively;
 conflicting values (including different arrays or root types) require resolution.
 Missing history never implies that a local key should be deleted. Other text is
 adopted only when it matches the declaration byte-for-byte; differing text requires
@@ -137,7 +151,7 @@ the live and declared executable status must match; live permission bits are pre
 | Situation | Prototype behavior |
 | --- | --- |
 | First activation, target absent | Create owner-writable regular file, mode 0600 or 0700 |
-| Regular file exists without a reconciled baseline | Merge independent JSON keys; adopt identical text; otherwise require explicit resolution |
+| Regular file exists without a reconciled baseline | Merge independent JSON/TOML keys; adopt identical text; otherwise require explicit resolution |
 | Declaration removed or disabled | Preserve live file and relinquish ownership |
 | Symlink-managed to reconciled | Accept only the exact old generation's home-files link; materialize C |
 | Reconciled to symlink-managed | Fail while a live target exists; manually move it aside first |
@@ -208,10 +222,10 @@ processes running as your user.
 Acceptance displays every changed hunk from live to candidate, escaping terminal
 control characters and showing newline escapes. Type exactly `yes` to approve;
 any other answer declines without creating a backup or approval. Only UTF-8 text
-without NUL bytes is accepted. For `.json` targets, candidate JSON syntax is also
+without NUL bytes is accepted. For `.json` and `.toml` targets, candidate syntax is also
 validated before review, and both replacement approvals and activation reject
-invalid JSON results. Desired JSON must also be valid, since it becomes the next
-baseline. An explicit resolution can repair invalid baseline or live JSON by
+invalid JSON/TOML results. Desired JSON/TOML must also be valid, since it becomes the next
+baseline. An explicit resolution can repair invalid baseline or live JSON/TOML by
 approving a valid result. No application-specific schema validation is
 performed. Human review authorizes the candidate, not a claim of semantic safety.
 
@@ -271,12 +285,13 @@ different ownership from the activating user/group, special permission bits,
 ACLs, or extended attributes are rejected rather than losing that metadata.
 
 The manifest and separate reconciliation helper allow additional strategies
-later without changing normal file generation. Structured formats other than JSON,
+later without changing normal file generation. Structured formats other than JSON and TOML,
 managed fragments, recursive directories, and automatic Nix updates are out of scope.
 
 ## Tests
 
 ```sh
+# Use Python with tomlkit installed (the integration derivation supplies it).
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/modules/files -p '*_test.py' -v
 nix-build tests/modules/files/reconciliation-integration.nix --no-out-link
 ```

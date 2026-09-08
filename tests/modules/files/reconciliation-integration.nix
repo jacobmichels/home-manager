@@ -87,7 +87,7 @@ let
       ${cfg.home.activation.linkGeneration.data}
       ${cfg.home.activation.onFilesChange.data}
       if [[ ! -v DRY_RUN ]]; then
-        ${pkgs.python3}/bin/python3 ${../../../modules/files/reconcile.py} finish "$HOME" <<< "$reconciliationPlan"
+        ${pkgs.python3.withPackages (ps: [ ps.tomlkit ])}/bin/python3 ${../../../modules/files/reconcile.py} finish "$HOME" <<< "$reconciliationPlan"
       fi
     '';
 in
@@ -109,7 +109,7 @@ pkgs.runCommand "reconciliation-integration"
       pkgs.gettext
       pkgs.gnused
       pkgs.gnugrep
-      pkgs.python3
+      (pkgs.python3.withPackages (ps: [ ps.tomlkit ]))
     ];
   }
   ''
