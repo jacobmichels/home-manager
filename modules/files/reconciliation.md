@@ -103,9 +103,34 @@ wins. All inputs must be valid TOML, including on creation, symlink migration,
 and adoption. Invalid TOML and duplicate keys fail without falling back to text.
 Conflict messages identify the key using JSON pointer notation, without values.
 
+Targets ending in `.ini` or `.desktop`, and targets named `mimeapps.list`, use
+three-way INI merging. This covers GTK settings, Thunderbird profiles, desktop
+entries, and MIME application associations. Sections and keys are case-sensitive;
+independent additions, changes, and deletions merge, while incompatible changes
+to the same key or deletion versus modification stop activation. Conflicts name
+the section/key using JSON pointer notation without printing values.
+
+The supported syntax is `[section]` headers and single-line `key=value` entries,
+with blank lines and whole-line `#` or `;` comments. Keys must belong to a section.
+Duplicate sections or keys, bare keys, colon delimiters, and multiline
+continuations are rejected, never silently merged as text. This is deliberately
+a subset of INI dialects, not support for Git config or systemd units.
+Values remain literal strings: no interpolation, type conversion, unescaping,
+or inline-comment stripping. Localized keys such as `Name[fr]` stay distinct.
+Semicolon-separated lists are whole values; different concurrent list edits
+conflict. Spaces/tabs around the delimiter are ignored, but trailing value
+whitespace remains significant.
+
+Live comments and formatting in surviving sections are retained, including
+unchanged entries and their order. Changed entries use their declared lines;
+new keys and sections are appended in declaration order. Comment-only changes
+do not conflict; live comments win. All inputs and merged results are checked
+for supported INI structure during creation, symlink migration, adoption, and
+resolution too. This does not validate application-specific keys or schemas.
+
 Other targets use line edit ranges against A, without producing conflict markers.
 The target filename selects the strategy, not the source filename or contents;
-`.jsonc`, `.json.backup`, and `.toml.backup` targets still use text merging.
+`.jsonc`, `.json.backup`, `.toml.backup`, and `.ini.backup` targets still use text merging.
 Newly observed local differences report `LOCAL CHANGES` on stderr.
 A clean combination of live and declarative edits
 reports `MERGE READY` during preflight; installation follows at the write phase.
@@ -134,7 +159,7 @@ the original line is absent. Ambiguous matches still fail.
 ## Adoption without a baseline
 
 An existing owner-writable regular file does not need a previous generated file.
-With no reconciled baseline, JSON objects and TOML tables combine independent keys recursively;
+With no reconciled baseline, JSON objects, TOML tables, and INI sections combine independent keys recursively;
 conflicting values (including different arrays or root types) require resolution.
 Missing history never implies that a local key should be deleted. Other text is
 adopted only when it matches the declaration byte-for-byte; differing text requires
@@ -153,7 +178,7 @@ the live and declared executable status must match; live permission bits are pre
 | Situation | Prototype behavior |
 | --- | --- |
 | First activation, target absent | Create owner-writable regular file, mode 0600 or 0700 |
-| Regular file exists without a reconciled baseline | Merge independent JSON/TOML keys; adopt identical text; otherwise require explicit resolution |
+| Regular file exists without a reconciled baseline | Merge independent JSON/TOML/INI keys; adopt identical text; otherwise require explicit resolution |
 | Declaration removed or disabled | Preserve live file and relinquish ownership |
 | Symlink-managed to reconciled | Accept only the exact old generation's home-files link; materialize C |
 | Reconciled to symlink-managed | Fail while a live target exists; manually move it aside first |
@@ -224,10 +249,10 @@ processes running as your user.
 Acceptance displays every changed hunk from live to candidate, escaping terminal
 control characters and showing newline escapes. Type exactly `yes` to approve;
 any other answer declines without creating a backup or approval. Only UTF-8 text
-without NUL bytes is accepted. For `.json` and `.toml` targets, candidate syntax is also
+without NUL bytes is accepted. For JSON, TOML, and INI targets, candidate structure is also
 validated before review, and both replacement approvals and activation reject
-invalid JSON/TOML results. Desired JSON/TOML must also be valid, since it becomes the next
-baseline. An explicit resolution can repair invalid baseline or live JSON/TOML by
+invalid JSON/TOML/INI results. Desired JSON/TOML/INI must also be valid, since it becomes the next
+baseline. An explicit resolution can repair invalid baseline or live JSON/TOML/INI by
 approving a valid result. No application-specific schema validation is
 performed. Human review authorizes the candidate, not a claim of semantic safety.
 
@@ -287,7 +312,7 @@ different ownership from the activating user/group, special permission bits,
 ACLs, or extended attributes are rejected rather than losing that metadata.
 
 The manifest and separate reconciliation helper allow additional strategies
-later without changing normal file generation. Structured formats other than JSON and TOML,
+later without changing normal file generation. Structured formats other than JSON, TOML, and the supported INI subset,
 managed fragments, recursive directories, and automatic Nix updates are out of scope.
 
 ## Tests

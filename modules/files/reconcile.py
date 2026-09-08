@@ -290,11 +290,103 @@ def merge_toml(base, live, desired):
     return encoded
 
 
+def is_ini(name):
+    return name.endswith((".ini", ".desktop")) or Path(name).name == "mimeapps.list"
+
+
+def parse_ini(data):
+    """Parse sectioned, single-line key=value files without interpreting values."""
+    validate_text(data)
+    values, sections, preamble = {}, {}, []
+    section = None
+    lines = data.decode("utf-8").split("\n")
+    for index, text in enumerate(lines):
+        line = text + ("\n" if index < len(lines) - 1 else "")
+        if not line:
+            continue
+        body = text.removesuffix("\r")
+        stripped = body.strip(" \t")
+        if "\r" in body:
+            raise Divergence("invalid INI line ending")
+        if not stripped or stripped.startswith(("#", ";")):
+            if section is None:
+                preamble.append(line)
+            else:
+                sections[section][1].append((None, line))
+            continue
+        if stripped.startswith("["):
+            if not stripped.endswith("]") or not stripped[1:-1] or any(
+                c in stripped[1:-1] for c in "[]\t"
+            ):
+                raise Divergence("invalid INI section")
+            section = stripped[1:-1]
+            if section in values:
+                raise Divergence("duplicate INI section")
+            values[section] = {}
+            sections[section] = (line, [])
+            continue
+        key, separator, value = body.partition("=")
+        key = key.strip(" \t")
+        if section is None or not separator or not key or any(c.isspace() for c in key):
+            raise Divergence("invalid INI entry; expected sectioned single-line key=value")
+        if key in values[section]:
+            raise Divergence("duplicate INI key")
+        # Leading delimiter whitespace is formatting; trailing value whitespace,
+        # escapes, %, #, and ; remain literal. Lists are indivisible values.
+        values[section][key] = value.lstrip(" \t")
+        sections[section][1].append((key, line))
+    return values, preamble, sections
+
+
+def merge_ini(base, live, desired):
+    missing = object()
+    a = missing if base is None else parse_ini(base)[0]
+    b, preamble, live_sections = parse_ini(live)
+    c, _, desired_sections = parse_ini(desired)
+    result = merge_values(a, b, c, missing, json_equal, "INI")
+    if result == b:
+        return live
+
+    output = list(preamble)
+
+    def append(line):
+        # An existing last line may have no newline. Separate appended entries.
+        if output and not output[-1].endswith("\n"):
+            output[-1] += "\n"
+        output.append(line)
+
+    # Retain live section/key order. Append declared additions in declared order.
+    for section in dict.fromkeys([*b, *c]):
+        if section not in result:
+            continue
+        header, entries = (live_sections if section in b else desired_sections)[section]
+        declared_lines = dict(desired_sections.get(section, ("", []))[1])
+        append(header)
+        written = set()
+        for key, line in entries:
+            if key is None:
+                append(line)
+            elif key in result[section]:
+                if section in b and result[section][key] != b[section][key]:
+                    line = declared_lines[key]
+                append(line)
+                written.add(key)
+        for key in c.get(section, {}):
+            if key in result[section] and key not in written:
+                append(declared_lines[key])
+    encoded = "".join(output).encode("utf-8")
+    if parse_ini(encoded)[0] != result:
+        raise Divergence("INI serialization changed merged values")
+    return encoded
+
+
 def validate_format(name, data):
     if name.endswith(".json"):
         parse_json(data)
     elif name.endswith(".toml"):
         parse_toml(data)
+    elif is_ini(name):
+        parse_ini(data)
 
 
 def merge(base, live, desired, name=""):
@@ -302,6 +394,8 @@ def merge(base, live, desired, name=""):
         return merge_json(base, live, desired)
     if name.endswith(".toml"):
         return merge_toml(base, live, desired)
+    if is_ini(name):
+        return merge_ini(base, live, desired)
     if base is None:
         validate_text(live, desired)
         if live == desired:
@@ -706,6 +800,8 @@ def accept_conflict(home, old, new, directory, confirm=None):
         if name.endswith(".json")
         else "TOML syntax validated"
         if name.endswith(".toml")
+        else "INI structure validated"
+        if is_ini(name)
         else "no format validation performed"
     )
     print(f"Review candidate for {target(home, name)} ({validation}):")
