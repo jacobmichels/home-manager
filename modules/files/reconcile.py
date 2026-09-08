@@ -7,6 +7,7 @@ must be quiescent during activation: POSIX has no compare-and-swap file replacem
 import base64
 import argparse
 import difflib
+import errno
 import hashlib
 import json
 import os
@@ -86,7 +87,13 @@ def snapshot(path):
         raise Divergence("live ownership differs from the activating user/group")
     if before.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
         raise Divergence("special permission bits are unsupported")
-    if os.listxattr(path):
+    try:
+        attributes = os.listxattr(path)
+    except OSError as error:
+        if error.errno != errno.ENOTSUP:
+            raise
+        attributes = []
+    if attributes:
         raise Divergence("extended attributes or ACLs require manual reconciliation")
     def identity(info):
         # Reading can update atime; it is not evidence of a concurrent edit.

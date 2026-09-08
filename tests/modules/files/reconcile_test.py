@@ -27,6 +27,20 @@ class Reconciliation(unittest.TestCase):
         self.home.mkdir()
         self.live = self.home / "config"
 
+    def test_filesystem_without_xattrs_can_reconcile(self):
+        self.live.write_bytes(b"local text\n")
+        with mock.patch.object(r.os, "listxattr", side_effect=OSError(r.errno.ENOTSUP, "unsupported")):
+            self.assertEqual(r.snapshot(self.live)["data"], r.encode(b"local text\n"))
+
+    def test_xattr_read_failures_and_existing_attributes_still_stop(self):
+        self.live.write_bytes(b"local text\n")
+        with mock.patch.object(r.os, "listxattr", side_effect=PermissionError(r.errno.EACCES, "denied")):
+            with self.assertRaises(PermissionError):
+                r.snapshot(self.live)
+        with mock.patch.object(r.os, "listxattr", return_value=["user.keep"]):
+            with self.assertRaises(r.Divergence):
+                r.snapshot(self.live)
+
     def generation(self, name, text, mutable=True):
         gen = self.root / name
         (gen / "home-files").mkdir(parents=True)
