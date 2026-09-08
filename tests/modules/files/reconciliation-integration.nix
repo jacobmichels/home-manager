@@ -116,6 +116,12 @@ pkgs.runCommand "reconciliation-integration"
     export PYTHONDONTWRITEBYTECODE=1
     export RECONCILE_MODULE=${../../../modules/files/reconcile.py}
     python3 ${./reconcile_test.py}
+    # Exercise the real activation's finalizer without the test Python environment.
+    # A copied command in activate-files cannot detect missing runtime dependencies.
+    sed -n '/reconcile.py.* finish /p' ${first.home.activationPackage}/activate > "$TMPDIR/finish.sh"
+    test -s "$TMPDIR/finish.sh"
+    mkdir "$TMPDIR/finish-home"
+    env -u PYTHONPATH -u PYTHONHOME HOME="$TMPDIR/finish-home" reconciliationPlan='[]' bash "$TMPDIR/finish.sh"
     export HOME="$TMPDIR/home"
     mkdir "$HOME"
     ${generation first}/reconcile --check

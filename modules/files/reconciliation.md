@@ -57,7 +57,9 @@ targets are skipped in the batched linker's classification loop.
   `onChange` reflects the actual planned content change.
 
 No live content is placed in the Nix store. Python becomes an activation
-dependency, including for generations that relinquish reconciled files.
+dependency, including for generations that relinquish reconciled files. Both
+preflight and the final activation cleanup use Python with `tomlkit`; installing
+`tomlkit` in the user profile is not required.
 
 ## Reconciliation
 

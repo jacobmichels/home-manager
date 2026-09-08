@@ -880,7 +880,7 @@ in
           # Reconciliation artifacts become disposable only after all hooks and
           # the current-generation update have succeeded.
           if [[ ! -v DRY_RUN && -v reconciliationPlan ]]; then
-            ${pkgs.python3}/bin/python3 ${./files/reconcile.py} finish "$HOME" <<< "$reconciliationPlan"
+            ${pkgs.python3.withPackages (ps: [ ps.tomlkit ])}/bin/python3 ${./files/reconcile.py} finish "$HOME" <<< "$reconciliationPlan"
           fi
         '';
       in
