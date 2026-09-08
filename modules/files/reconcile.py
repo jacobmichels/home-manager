@@ -850,7 +850,6 @@ def check(home, old, new):
     for name in sorted(previous | current):
         path = name
         approval = None
-        local_notice = None
         try:
             path = target(home, name)
             desired_path = Path(new) / "home-files" / name
@@ -912,12 +911,7 @@ def check(home, old, new):
                         file=sys.stderr,
                     )
                 if not approval and live != desired:
-                    if result == live:
-                        local_notice = {
-                            "live": digest(live),
-                            "declared": digest(desired),
-                        }
-                    elif live != base:
+                    if result != live and live != base:
                         print(
                             f"MERGE READY: {path}\n"
                             "Live edits and declarative changes merge cleanly; result will be installed during activation.",
@@ -930,7 +924,7 @@ def check(home, old, new):
                     "result": encode(result),
                     "mode": mode,
                     "approval": approval,
-                    "local_notice": local_notice,
+                    "local_changes": result != desired,
                     "reconciler": str(Path(new) / "reconcile"),
                     "status_command": shlex.quote(str(Path(new) / "reconcile"))
                     + " --check --verbose",
@@ -947,30 +941,9 @@ def check(home, old, new):
 
 
 def report_local_changes(home, plan, verbose=False):
-    """Notification cache only: never consulted when deciding file contents."""
-    known = 0
     shown = 0
     for entry in plan:
-        fingerprint = entry.get("local_notice")
-        if fingerprint is None:
-            continue
-        try:
-            cache = target(
-                home,
-                ".local/state/home-manager/reconciliation/notices/"
-                + digest(os.fsencode(entry["name"]))
-                + ".json",
-            )
-            cached = snapshot(cache)
-            previous = (
-                json.loads(base64.b64decode(cached["data"]))
-                if cached and "data" in cached
-                else None
-            )
-        except (Divergence, OSError, ValueError):
-            previous = None
-        if previous == fingerprint and not verbose:
-            known += 1
+        if not entry["local_changes"]:
             continue
         print(
             f"LOCAL CHANGES: {target(home, entry['name'])}\n"
@@ -997,35 +970,7 @@ def report_local_changes(home, plan, verbose=False):
                 "  Applications may recreate local differences after writing their settings again.",
                 file=sys.stderr,
             )
-        # Persist only after printing, outside preflight. Cache failures must
-        # never fail reconciliation or suppress the next notification.
-        temporary = None
-        try:
-            cache = target(
-                home,
-                ".local/state/home-manager/reconciliation/notices/"
-                + digest(os.fsencode(entry["name"]))
-                + ".json",
-            )
-            cache.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            cached = snapshot(cache)
-            if cached is not None and "data" not in cached:
-                raise Divergence("notification cache is not a regular file")
-            fd, temporary = tempfile.mkstemp(prefix=".notice-", dir=cache.parent)
-            with os.fdopen(fd, "w") as stream:
-                json.dump(fingerprint, stream)
-            os.replace(temporary, cache)
-        except (Divergence, OSError, ValueError) as error:
-            print(f"Could not remember local-change notice: {error}", file=sys.stderr)
-        finally:
-            if temporary is not None and os.path.exists(temporary):
-                os.unlink(temporary)
-    if known:
-        print(
-            f"Reconciliation: {known} file(s) have previously reported local changes.",
-            file=sys.stderr,
-        )
-    if (known or shown) and not verbose:
+    if shown and not verbose:
         print(f"Show files: {plan[0]['status_command']}", file=sys.stderr)
         print(
             "Local changes are informational, not conflicts. The command above shows how to keep or resolve them.",
@@ -1104,7 +1049,7 @@ def report_status(home, old, new, verbose=False):
     ):
         print("Reconciled files match the declaration.")
     print(
-        "Check complete; no managed files were installed and no approvals were consumed. Notification history updated."
+        "Check complete; no managed files were installed and no approvals were consumed."
     )
 
 

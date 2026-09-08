@@ -131,20 +131,15 @@ resolution too. This does not validate application-specific keys or schemas.
 Other targets use line edit ranges against A, without producing conflict markers.
 The target filename selects the strategy, not the source filename or contents;
 `.jsonc`, `.json.backup`, `.toml.backup`, and `.ini.backup` targets still use text merging.
-Newly observed local differences report `LOCAL CHANGES` on stderr.
+Local differences report `LOCAL CHANGES` with each filename on stderr.
 A clean combination of live and declarative edits
 reports `MERGE READY` during preflight; installation follows at the write phase.
 Local-change notices are emitted after file application or by `--check`, not
-during preflight. SHA-256 fingerprints of live and declared contents are stored
-after printing under `~/.local/state/home-manager/reconciliation/notices`.
-Unchanged previously reported files produce one count summary instead of a
-message per file. Changed content or declaration produces a fresh notice.
-`reconcile --check --verbose` lists every locally modified file. This notification
-history never approves content, advances a baseline, or suppresses conflicts,
-pending merges, or approval messages. Cache errors are nonfatal and result in
-repeated notices. Preflight and activation dry runs do not acknowledge notices.
-`--check` leaves managed files and approvals untouched but may write this
-notification history; it is no longer strictly read-only for metadata.
+during preflight. Every activation and `--check` lists all files whose resulting
+contents differ from the declaration, including previously reported files and
+local edits preserved by a clean merge. `reconcile --check --verbose` adds
+resolution instructions. Reporting stores no notification history; `--check`
+leaves managed files and approvals untouched.
 Identical edits coalesce. Adjacent replacements are accepted, so changing the
 theme on one line and font size on the next merges. Live insertions immediately
 before or after an unchanged baseline line are preserved when Nix replaces only
