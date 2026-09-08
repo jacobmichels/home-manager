@@ -26,39 +26,43 @@ let
   conflict = make "theme=catppuccin\nfont=16\n" true;
   immutable = make "theme=light\nfont=14\n" false;
   removed = make null false;
-  global = (import ../../../modules {
-    inherit pkgs;
-    configuration = {
-      home.username = "hm-test";
-      home.homeDirectory = "/homeless-shelter";
-      home.stateVersion = "25.05";
-      manual.manpages.enable = false;
-      home.fileReconciliation.enable = true;
-      home.fileReconciliation.exclude = [ ".config/global/excluded" ".config/global/reopted" ];
-      home.file.config.text = "global default\n";
-      home.file."./normalized".text = "normalized target\n";
-      home.file.static = {
-        text = "opt out\n";
-        reconciliation.enable = false;
+  global =
+    (import ../../../modules {
+      inherit pkgs;
+      configuration = {
+        home.username = "hm-test";
+        home.homeDirectory = "/homeless-shelter";
+        home.stateVersion = "25.05";
+        manual.manpages.enable = false;
+        home.fileReconciliation.enable = true;
+        home.fileReconciliation.exclude = [
+          ".config/global/excluded"
+          ".config/global/reopted"
+        ];
+        home.file.config.text = "global default\n";
+        home.file."./normalized".text = "normalized target\n";
+        home.file.static = {
+          text = "opt out\n";
+          reconciliation.enable = false;
+        };
+        xdg.configFile."global/config".text = "xdg default\n";
+        xdg.configFile."global/excluded".text = "excluded\n";
+        xdg.configFile."global/reopted" = {
+          text = "explicit opt in beats exclusion\n";
+          reconciliation.enable = true;
+        };
+        xdg.configFile."global/static" = {
+          text = "xdg opt out\n";
+          reconciliation.enable = false;
+        };
+        programs.ghostty = {
+          enable = true;
+          package = null;
+          systemd.enable = false;
+          settings.font-size = 20;
+        };
       };
-      xdg.configFile."global/config".text = "xdg default\n";
-      xdg.configFile."global/excluded".text = "excluded\n";
-      xdg.configFile."global/reopted" = {
-        text = "explicit opt in beats exclusion\n";
-        reconciliation.enable = true;
-      };
-      xdg.configFile."global/static" = {
-        text = "xdg opt out\n";
-        reconciliation.enable = false;
-      };
-      programs.ghostty = {
-        enable = true;
-        package = null;
-        systemd.enable = false;
-        settings.font-size = 20;
-      };
-    };
-  }).config;
+    }).config;
   generation =
     cfg:
     pkgs.runCommand "reconciliation-test-generation" { } ''
