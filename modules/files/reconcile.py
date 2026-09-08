@@ -7,6 +7,7 @@ must be quiescent during activation: POSIX has no compare-and-swap file replacem
 import base64
 import argparse
 import difflib
+from decimal import Decimal
 import errno
 import hashlib
 import json
@@ -144,7 +145,102 @@ def validate_text(*contents):
             raise Divergence("non-UTF-8 files are unsupported") from error
 
 
-def merge(base, live, desired):
+def parse_json(data):
+    validate_text(data)
+
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise Divergence("duplicate JSON object key")
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise Divergence("non-finite JSON number")
+
+    try:
+        return json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=object_pairs,
+            parse_float=Decimal,
+            parse_constant=invalid_constant,
+        )
+    except (ValueError, ArithmeticError, RecursionError) as error:
+        # Do not include configuration contents (potentially secrets) in errors.
+        raise Divergence("invalid JSON") from error
+
+
+def json_equal(left, right):
+    # Python equates True with 1, including inside lists and dictionaries.
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(
+            json_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(map(json_equal, left, right))
+    return left == right
+
+
+def merge_json(base, live, desired):
+    a, b, c = map(parse_json, (base, live, desired))
+    missing = object()
+
+    def combine(a, b, c, path=""):
+        if json_equal(b, a):
+            return c
+        if json_equal(c, a) or json_equal(b, c):
+            return b
+        if (
+            isinstance(b, dict)
+            and isinstance(c, dict)
+            and (isinstance(a, dict) or a is missing)
+        ):
+            a = {} if a is missing else a
+            result = {}
+            for key in sorted(a.keys() | b.keys() | c.keys()):
+                pointer = path + "/" + key.replace("~", "~0").replace("/", "~1")
+                value = combine(
+                    a.get(key, missing),
+                    b.get(key, missing),
+                    c.get(key, missing),
+                    pointer,
+                )
+                if value is not missing:
+                    result[key] = value
+            return result
+        raise Divergence(f"conflicting JSON edits at JSON pointer {ascii(path)}")
+
+    def render(value):
+        # Decimal avoids rounding local numbers when another key changes.
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, dict):
+            return (
+                "{"
+                + ", ".join(
+                    json.dumps(key) + ": " + render(item) for key, item in value.items()
+                )
+                + "}"
+            )
+        if isinstance(value, list):
+            return "[" + ", ".join(map(render, value)) + "]"
+        return json.dumps(value)
+
+    result = combine(a, b, c)
+    # Keep existing formatting when no combined document needs to be written.
+    if json_equal(result, b):
+        return live
+    if json_equal(result, c):
+        return desired
+    return (render(result) + "\n").encode("utf-8")
+
+
+def merge(base, live, desired, name=""):
+    if name.endswith(".json"):
+        return merge_json(base, live, desired)
     validate_text(base, live, desired)
     if live == base:
         return desired
@@ -392,6 +488,8 @@ def resolution_inputs(home, old, new, filename):
     base, desired = base_path.read_bytes(), desired_path.read_bytes()
     live = base64.b64decode(state["data"])
     validate_text(base, live, desired)
+    if name.endswith(".json"):
+        parse_json(desired)
     return name, state, base, live, desired
 
 
@@ -407,6 +505,8 @@ def resolve(home, old, new, filename, replace=True):
 
 
 def approve_candidate(home, name, state, base, live, desired, result, workspace=None):
+    if name.endswith(".json"):
+        parse_json(result)
     path = target(home, name)
     receipt_path = approval_path(home, name)
     receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -526,9 +626,14 @@ def accept_conflict(home, old, new, directory, confirm=None):
         raise Divergence("Candidate must be a regular file.")
     candidate = base64.b64decode(candidate_state["data"])
     validate_text(candidate)
-    print(
-        f"Review candidate for {target(home, name)} (no format validation performed):"
+    if name.endswith(".json"):
+        parse_json(candidate)
+    validation = (
+        "JSON syntax validated"
+        if name.endswith(".json")
+        else "no format validation performed"
     )
+    print(f"Review candidate for {target(home, name)} ({validation}):")
     # Escape controls so config contents cannot hide deletions with terminal
     # escape sequences. repr also makes absent final newlines visible.
     for line in difflib.unified_diff(
@@ -593,7 +698,7 @@ def check(home, old, new):
             if state is None:
                 if name in previous:
                     raise Divergence("application deleted the managed file")
-                result = merge(b"", b"", desired)
+                result = merge(desired, desired, desired, name)
             elif "link" in state:
                 expected = (
                     str((Path(old) / "home-files").resolve() / name) if old else None
@@ -605,7 +710,7 @@ def check(home, old, new):
                 ):
                     raise Divergence("unexpected live symlink")
                 base = base_path.read_bytes()
-                result = merge(base, base, desired)
+                result = merge(base, base, desired, name)
             else:
                 if name not in previous or not base_path.is_file():
                     raise Divergence("existing file has no reconciled baseline")
@@ -622,9 +727,12 @@ def check(home, old, new):
                 result = (
                     base64.b64decode(approval["result"])
                     if approval
-                    else merge(base, live, desired)
+                    else merge(base, live, desired, name)
                 )
                 if approval:
+                    if name.endswith(".json"):
+                        parse_json(desired)
+                        parse_json(result)
                     print(
                         f"RESOLUTION APPROVED: {path}\nBackup: {approval['backup']}",
                         file=sys.stderr,
