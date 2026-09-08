@@ -176,6 +176,141 @@ class Reconciliation(unittest.TestCase):
             self.activate(old, new)
         self.assertEqual(r.snapshot(live), before)
 
+    def test_toml_creation_and_symlink_migration_validate_inputs(self):
+        new = self.generation("new", b'value=2\n', filename="config.toml")
+        live = self.home / "config.toml"
+        self.activate("", new)
+        self.assertEqual(live.read_bytes(), b'value=2\n')
+        live.unlink()
+        old = self.generation("old", b'value=1\n', False, "config.toml")
+        live.symlink_to(Path(old) / "home-files/config.toml")
+        self.activate(old, new)
+        self.assertFalse(live.is_symlink())
+        self.assertEqual(live.read_bytes(), b'value=2\n')
+        live.unlink()
+        (Path(new) / "home-files/config.toml").write_bytes(b'broken = ')
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            self.activate("", new)
+        self.assertFalse(live.exists())
+        live.symlink_to(Path(old) / "home-files/config.toml")
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            self.activate(old, new)
+        self.assertTrue(live.is_symlink())
+
+    def test_toml_conflicts_and_invalid_inputs_stop_before_any_write(self):
+        old = self.generation("old", b'key=1\n', filename="config.toml")
+        new = self.generation("new", b'key=2\n', filename="config.toml")
+        (Path(new) / "home-files/aaa").write_bytes(b"create me")
+        (Path(new) / "reconciliation.json").write_text('["aaa", "config.toml"]')
+        live = self.home / "config.toml"
+        for contents in (b'key=3\n', b'broken = ', b'key=1\nkey=4\n'):
+            with self.subTest(contents=contents):
+                live.write_bytes(contents)
+                before = r.snapshot(live)
+                with self.assertRaises(r.Divergence):
+                    self.activate(old, new)
+                self.assertEqual(r.snapshot(live), before)
+                self.assertFalse((self.home / "aaa").exists())
+
+    def test_toml_resolution_rejects_invalid_results_and_repairs_invalid_live(self):
+        old = self.generation("old", b'key=1\n', filename="config.toml")
+        new = self.generation("new", b'key=2\n', filename="config.toml")
+        live = self.home / "config.toml"
+        live.write_bytes(b'broken = ')
+        workspace = r.export_conflict(self.home, old, new, "config.toml")
+        confirm = mock.Mock(return_value="yes")
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            r.accept_conflict(self.home, old, new, workspace, confirm)
+        confirm.assert_not_called()
+        self.assertFalse(r.approval_path(self.home, "config.toml").exists())
+        self.assertEqual(list(self.home.glob("*.hm-backup-*")), [])
+        (workspace / "candidate").write_bytes(b'key=2\nlocal=true\n')
+        self.assertTrue(r.accept_conflict(self.home, old, new, workspace, confirm))
+        self.activate(old, new)
+        self.assertEqual(live.read_bytes(), b'key=2\nlocal=true\n')
+
+        (Path(new) / "home-files/config.toml").write_bytes(b'invalid = ')
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            r.resolve(self.home, old, new, "config.toml")
+        (Path(new) / "home-files/config.toml").write_bytes(b'key=2\n')
+        r.resolve(self.home, old, new, "config.toml")
+        # Approvals from an older reconciler must also pass TOML validation.
+        receipt_path = r.approval_path(self.home, "config.toml")
+        receipt = json.loads(receipt_path.read_text())
+        receipt["result"] = r.encode(b'invalid = ')
+        receipt_path.write_text(json.dumps(receipt))
+        before = r.snapshot(live)
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            self.activate(old, new)
+        self.assertEqual(r.snapshot(live), before)
+        r.resolve(self.home, old, new, "config.toml")
+        self.activate(old, new)
+        self.assertEqual(live.read_bytes(), b'key=2\n')
+
+    def test_toml_resolution_cannot_advance_invalid_desired_baseline(self):
+        old = self.generation("old", b'key=1\n', filename="config.toml")
+        new = self.generation("new", b'invalid = ', filename="config.toml")
+        live = self.home / "config.toml"
+        live.write_bytes(b'key=3\n')
+        before = r.snapshot(live)
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            r.export_conflict(self.home, old, new, "config.toml")
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            r.resolve(self.home, old, new, "config.toml")
+        self.assertFalse((self.home / ".local").exists())
+        self.assertEqual(list(self.home.glob("*.hm-backup-*")), [])
+
+        desired_path = Path(new) / "home-files/config.toml"
+        desired_path.write_bytes(b'key=2\n')
+        workspace = r.export_conflict(self.home, old, new, "config.toml")
+        (workspace / "candidate").write_bytes(b'key=2\nlocal=true\n')
+        desired_path.write_bytes(b'invalid = ')
+        confirm = mock.Mock(return_value="yes")
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            r.accept_conflict(self.home, old, new, workspace, confirm)
+        confirm.assert_not_called()
+        self.assertFalse(r.approval_path(self.home, "config.toml").exists())
+
+        desired_path.write_bytes(b'key=2\n')
+        r.resolve(self.home, old, new, "config.toml")
+        # Model a legacy receipt for a valid candidate but an invalid desired file.
+        receipt_path = r.approval_path(self.home, "config.toml")
+        receipt = json.loads(receipt_path.read_text())
+        desired_path.write_bytes(b'invalid = ')
+        receipt["desired"] = r.digest(b'invalid = ')
+        receipt_path.write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(r.Divergence, "invalid TOML"):
+            self.activate(old, new)
+        self.assertEqual(r.snapshot(live), before)
+
+    def test_toml_activation_preserves_local_config_and_comments(self):
+        name = ".codex/config.toml"
+        old = self.generation("old", b'[mcp_servers.shared]\nurl = "old"\n', filename=name)
+        new = self.generation("new", b'[mcp_servers.shared]\nurl = "new"\n', filename=name)
+        live = self.home / name
+        live.parent.mkdir()
+        live.write_bytes(b'# local preference\nmodel = "local" # keep\n'
+                         b'[mcp_servers.shared]\nurl = "old" # shared\n'
+                         b'[mcp_servers.local]\ncommand = "local"\n')
+        live.chmod(0o640)
+        self.activate(old, new)
+        self.assertEqual(live.read_bytes(), b'# local preference\nmodel = "local" # keep\n'
+                         b'[mcp_servers.shared]\nurl = "new" # shared\n'
+                         b'[mcp_servers.local]\ncommand = "local"\n')
+        self.assertEqual(live.stat().st_mode & 0o777, 0o640)
+
+    def test_toml_adoption_and_subsequent_merge(self):
+        name = "config.toml"
+        first = self.generation("first", b'[server]\nurl="one"\n', filename=name)
+        second = self.generation("second", b'[server]\nurl="two"\n', filename=name)
+        live = self.home / name
+        live.write_bytes(b'# keep\nlocal=true\n')
+        self.activate("", first)
+        self.activate(first, second)
+        self.assertEqual(r.parse_toml(live.read_bytes()).unwrap(),
+                         {"local": True, "server": {"url": "two"}})
+        self.assertTrue(live.read_bytes().startswith(b'# keep\n'))
+
     def activate(self, old, new):
         r.apply(self.home, r.check(self.home, old, new))
 
@@ -384,7 +519,7 @@ class Reconciliation(unittest.TestCase):
         foreign = self.home / "zzz.toml"
         foreign.write_bytes(b"local=true\n")
         for name, contents in (("aaa", b"create me"), ("broken.json", b"{invalid"),
-                               ("zzz.toml", b"declared=true\n")):
+                               ("zzz.toml", b"local=false\n")):
             (Path(new) / "home-files" / name).write_bytes(contents)
         (Path(new) / "reconciliation.json").write_text(
             json.dumps(["aaa", "broken.json", "config", "zzz.toml"]))
@@ -1004,9 +1139,86 @@ class JsonMerge(unittest.TestCase):
         self.assertNotIn("secret", str(caught.exception))
 
     def test_other_suffixes_keep_text_merging(self):
-        for name in ("config", "config.toml", "config.jsonc", "config.json.backup"):
+        for name in ("config", "config.toml.backup", "config.jsonc", "config.json.backup"):
             with self.subTest(name=name):
                 self.assertEqual(r.merge(b'old', b'old', b'not JSON', name), b'not JSON')
+
+
+class TomlMerge(unittest.TestCase):
+    def merge(self, base, live, desired):
+        return r.merge(base, live, desired, "config.toml")
+
+    def test_independent_edits_deletions_and_table_forms(self):
+        cases = [
+            (b'a=1\nb=2\n', b'b=2\nlocal=true\n', b'a=1\nb=3\n',
+             {"b": 3, "local": True}),
+            (b'x={a=1,b=2}\n', b'x={a=3,b=2} # keep\n', b'x={a=1,b=4}\n',
+             {"x": {"a": 3, "b": 4}}),
+            (b'x.a=1\nx.b=2\n', b'x.a=3\nx.b=2\n', b'[x]\na=1\nb=4\n',
+             {"x": {"a": 3, "b": 4}}),
+            (b'', b'[x]\nlocal=true\n', b'[x]\nnix=true\n',
+             {"x": {"local": True, "nix": True}}),
+            (b'x=1\n', b'x={a=2}\n', b'x=1\ny=true\n',
+             {"x": {"a": 2}, "y": True}),
+            (b'[x]\na=1\n', b'[x]\na=1\nlocal=true\n', b'[x]\n',
+             {"x": {"local": True}}),
+        ]
+        for base, live, desired, expected in cases:
+            with self.subTest(live=live):
+                result = self.merge(base, live, desired)
+                self.assertEqual(r.parse_toml(result).unwrap(), expected)
+
+    def test_conflicts_include_deletion_types_arrays_and_arrays_of_tables(self):
+        for base, live, desired in [
+            (b'x=1', b'x=2', b'x=3'),
+            (b'x=1', b'', b'x=2'),
+            (b'x=1', b'x=2', b''),
+            (b'x=true', b'x=1', b'x=2'),
+            (b'x=1', b'x=1.0', b'x=2'),
+            (b'x=[1,2]', b'x=[3,2]', b'x=[1,4]'),
+            (b'[[x]]\na=1\nb=2', b'[[x]]\na=3\nb=2', b'[[x]]\na=1\nb=4'),
+            (b'x=1', b'[x]\na=1', b'[x]\nb=2'),
+        ]:
+            with self.subTest(live=live), self.assertRaisesRegex(r.Divergence, "conflicting TOML edits"):
+                self.merge(base, live, desired)
+
+    def test_signed_zero_is_a_value_change(self):
+        with self.assertRaisesRegex(r.Divergence, "conflicting TOML edits"):
+            self.merge(b'x=0.0', b'x=-0.0', b'x=1.0')
+        result = self.merge(b'x=0.0', b'x=0.0\nlocal=true\n', b'x=-0.0')
+        self.assertIn(b'x=-0.0', result)
+        self.assertIn(b'local=true', result)
+
+    def test_comments_and_formatting_survive_declarative_change(self):
+        live = b'# local header\nx = 1 # explanation\n'
+        self.assertEqual(self.merge(b'x=1', live, b'x=2'),
+                         b'# local header\nx = 2 # explanation\n')
+        self.assertEqual(self.merge(b'x=1', live, b'x = 1'), live)
+
+    def test_dates_special_floats_and_arrays_survive_unrelated_change(self):
+        for value in (b'1979-05-27', b'07:32:00', b'1979-05-27T07:32:00Z',
+                      b'1979-05-27T07:32:00', b'nan', b'+inf', b'-inf',
+                      b'0.1234567890123456789', b'[1, "two", true]'):
+            with self.subTest(value=value):
+                base = b'x=1\nv=' + value + b'\n'
+                live = base + b'local=true\n'
+                result = self.merge(base, live, base.replace(b'x=1', b'x=2'))
+                self.assertIn(b'v=' + value + b'\n', result)
+                self.assertIn(b'x=2', result)
+        live = b'x=1\n[[local]]\na=2 # keep\n'
+        self.assertEqual(self.merge(b'x=1', live, b'x=2'), live.replace(b'x=1', b'x=2'))
+
+    def test_all_inputs_validated_even_when_identical(self):
+        for value in (b'x=', b'x=1\nx=2', b'[x]\n[x]', b'x=1\n[x]', b'x=null', b'\xff', b'x="\x00"'):
+            for inputs in ((value, value, value), (value, b'', b''),
+                           (b'', value, b''), (b'', b'', value)):
+                with self.subTest(inputs=inputs), self.assertRaises(r.Divergence):
+                    self.merge(*inputs)
+
+    def test_conflict_does_not_leak_values(self):
+        with self.assertRaisesRegex(r.Divergence, "'/a~1b~0'") as caught:
+            self.merge(b'"a/b~"="base"', b'"a/b~"="secret1"', b'"a/b~"="secret2"')
+        self.assertNotIn("secret", str(caught.exception))
 
 
 if __name__ == "__main__":

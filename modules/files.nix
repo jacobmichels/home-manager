@@ -34,7 +34,7 @@ let
   reconciliationManifest = pkgs.writeText "home-manager-reconciliation.json" (
     builtins.toJSON (map (f: f.target) reconciled)
   );
-  reconcile = "${pkgs.python3}/bin/python3 ${./files/reconcile.py}";
+  reconcile = "${pkgs.python3.withPackages (ps: [ ps.tomlkit ])}/bin/python3 ${./files/reconcile.py}";
   resolveCommand = pkgs.writeShellScript "home-manager-reconcile" ''
     exec ${reconcile} resolve --generation @generation@ "$@"
   '';
