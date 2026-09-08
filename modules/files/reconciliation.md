@@ -48,7 +48,8 @@ targets are skipped in the batched linker's classification loop.
 * `modules/lib-bash/activation-init.sh` sets `oldGenPath` from the current
   generation GC root and `newGenPath` from the activation script's generation.
 * `checkReconciledFiles` creates an in-memory plan before `writeBoundary` and
-  before `checkFilesChanged`. Any divergence aborts without installing files.
+  before `checkFilesChanged`. It checks every reconciled target and reports all
+  per-file divergences together. Any divergence aborts without installing files.
 * Existing `checkLinkTargets` and `linkGeneration` skip new reconciled targets.
   Cleanup skips old reconciled targets, including ones replaced with symlinks.
 * At the start of `linkGeneration`, all live snapshots are checked again. Each

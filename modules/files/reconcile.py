@@ -675,6 +675,7 @@ def check(home, old, new):
     previous = set(manifest(old))
     current = set(manifest(new))
     plan = []
+    errors = []
     for name in sorted(previous | current):
         path = name
         approval = None
@@ -763,10 +764,12 @@ def check(home, old, new):
                 }
             )
         except (Divergence, OSError, ValueError) as error:
-            raise Divergence(
+            errors.append(
                 f"DIVERGENCE: {path}\n"
                 f"File was not modified. {error}" + resolution_guidance(old, new, name)
-            ) from error
+            )
+    if errors:
+        raise Divergence("\n\n".join(errors))
     return plan
 
 
