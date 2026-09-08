@@ -84,8 +84,8 @@ All three inputs must be valid JSON, even when their bytes match. Duplicate keys
 and non-finite numbers are rejected. Invalid JSON never falls back to text merging.
 Existing formatting is retained when the result matches live or desired JSON;
 otherwise the combined document is serialized as compact JSON with a final newline.
-First-time creation and symlink migration validate JSON too. Existing unmanaged
-files still require explicit migration.
+First-time creation and symlink migration validate JSON too. Existing regular
+files can be adopted without a generated baseline, as described below.
 
 Other targets use line edit ranges against A, without producing conflict markers.
 The target filename selects the strategy, not the source filename or contents;
@@ -115,12 +115,29 @@ An agreed single-line replacement also coalesces when one side adds surrounding
 lines in the same diff hunk, provided the agreed line occurs exactly once and
 the original line is absent. Ambiguous matches still fail.
 
+## Adoption without a baseline
+
+An existing owner-writable regular file does not need a previous generated file.
+With no reconciled baseline, JSON objects combine independent keys recursively;
+conflicting values (including different arrays or root types) require resolution.
+Missing history never implies that a local key should be deleted. Other text is
+adopted only when it matches the declaration byte-for-byte; differing text requires
+`--export`/`--accept` or an explicit `--replace`, even if one file is empty.
+
+These commands also work on first activation, after a declaration is re-added,
+or if the previous generated file is missing. A missing baseline is distinct from
+an empty file or JSON `null`. Approval is invalidated if a baseline appears or
+changes. After successful activation, the generated declaration becomes the next
+baseline, so later changes use the normal three-way merge. Ownership, permissions,
+file-type checks and the activation write boundary still apply. On initial adoption,
+the live and declared executable status must match; live permission bits are preserved.
+
 ## Edge cases
 
 | Situation | Prototype behavior |
 | --- | --- |
 | First activation, target absent | Create owner-writable regular file, mode 0600 or 0700 |
-| Foreign file already exists | Fail, even if contents equal C and backups are enabled |
+| Regular file exists without a reconciled baseline | Merge independent JSON keys; adopt identical text; otherwise require explicit resolution |
 | Declaration removed or disabled | Preserve live file and relinquish ownership |
 | Symlink-managed to reconciled | Accept only the exact old generation's home-files link; materialize C |
 | Reconciled to symlink-managed | Fail while a live target exists; manually move it aside first |
@@ -134,8 +151,8 @@ the original line is absent. Ambiguous matches still fail.
 | Rollback to a generation built before this feature | Its old activation code cannot enforce these safeguards; unsupported |
 
 Removing and later re-adding a declaration does not recover its baseline: a
-remaining live file is foreign again. Manually moving it aside is the explicit
-resolution path. Home Manager's ordinary backup settings and permanent `force`
+remaining live file is adopted using the same no-baseline rules. Home Manager's
+ordinary backup settings and permanent `force`
 settings do not bypass conflicts.
 
 Both standalone `home-manager switch` and the NixOS Home Manager module execute
@@ -151,11 +168,10 @@ undo the conflicting declarative change or make the declaration match the live
 contents. To accept Nix, make the live file match the new desired contents. To
 combine changes manually, put the resolved contents in both the live file and
 the declaration, then reactivate. File-type, ownership, and permission failures
-must be resolved separately; matching contents does not override them. A foreign
-file without reconciled ownership must be moved aside before it can be managed.
+must be resolved separately; matching contents does not override them.
 Failed activations do not advance the Home Manager baseline.
 
-For content conflicts on already reconciled regular files, the divergence output
+For content conflicts on existing regular files, the divergence output
 prints two exact commands bound to the desired generation:
 
 ```sh
@@ -180,7 +196,9 @@ Use the desired generation's executable printed in the divergence guidance:
 
 Export creates an owner-private workspace under
 `~/.local/state/home-manager/reconciliation/workspaces`, containing `base`,
-`live`, `declared`, and `candidate` (initially a copy of live). Input metadata
+`live`, `declared`, and `candidate` (initially a copy of live). When no reconciled
+baseline exists, `base` is omitted and the metadata records its absence explicitly.
+Input metadata
 is stored alongside the workspace, not inside it. Keep these files local unless
 you explicitly choose to share them: they may contain secrets. No agent is
 invoked and no data is uploaded. Give an agent only the workspace, not authority
@@ -219,7 +237,8 @@ The commands accept one absolute path or one path relative to HOME. They are
 available directly from the failed generation even if its Home Manager package
 has not been activated yet, in both standalone and NixOS usage. They do not
 bypass ownership, file-type, encoding, or executable-mode restrictions, and do
-not adopt foreign files. No global `home-manager reconcile` subcommand is added
+not adopt files absent from the desired reconciliation manifest. No global
+`home-manager reconcile` subcommand is added
 by this prototype.
 
 The same generation-local command accepts `--check` with no file argument. It

@@ -274,11 +274,108 @@ class Reconciliation(unittest.TestCase):
         self.assertEqual(r.snapshot(self.live), before)
         self.assertFalse((self.home / "aaa").exists())
 
-    def test_foreign_file_even_identical(self):
+    def test_initial_identical_text_is_adopted_without_rewriting(self):
         self.live.write_bytes(b"same")
+        before = r.snapshot(self.live)
+        self.activate("", self.generation("new", b"same"))
+        self.assertEqual(r.snapshot(self.live), before)
+
+    def test_json_adoption_without_history_and_subsequent_three_way_merge(self):
+        filename = ".claude.json"
+        live = self.home / filename
+        for index, kind in enumerate(("first", "unmanaged", "missing")):
+            with self.subTest(kind=kind):
+                old = "" if kind == "first" else self.generation(
+                    "old" + kind, b'{"shared":0}' if kind == "unmanaged" else None,
+                    mutable=kind != "unmanaged", filename=filename)
+                new = self.generation("new" + kind, b'{"shared":1}', filename=filename)
+                live.write_bytes(b'{"local":{"token":"keep"}}')
+                live.chmod(0o640)
+                self.activate(old, new)
+                self.assertEqual(json.loads(live.read_bytes()), {"shared": 1, "local": {"token": "keep"}})
+                self.assertEqual(live.stat().st_mode & 0o777, 0o640)
+                next_gen = self.generation("next" + kind, b'{"shared":2}', filename=filename)
+                self.activate(new, next_gen)
+                self.assertEqual(json.loads(live.read_bytes()), {"shared": 2, "local": {"token": "keep"}})
+
+    def test_initial_json_conflicts_preserve_local_file(self):
+        new = self.generation("new", b'{"shared":1}', filename="config.json")
+        live = self.home / "config.json"
+        live.write_bytes(b'{"shared":2,"local":true}')
+        before = r.snapshot(live)
+        with self.assertRaisesRegex(r.Divergence, "conflicting JSON edits"):
+            self.activate("", new)
+        self.assertEqual(r.snapshot(live), before)
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_initial_candidate_resolution_preserves_settings_and_binds_missing_baseline(self):
+        new = self.generation("new", b"shared=1\n")
+        original = b"shared=2\nlocal=keep\n"
+        self.live.write_bytes(original)
+        workspace = r.export_conflict(self.home, "", new, "config")
+        self.assertFalse((workspace / "base").exists())
+        metadata = json.loads(workspace.with_suffix(".json").read_text())
+        self.assertIsNone(metadata["base"])
+        self.assertEqual(metadata["old"], "")
+        candidate = b"shared=1\nlocal=keep\n"
+        (workspace / "candidate").write_bytes(candidate)
+        self.assertTrue(r.accept_conflict(self.home, "", new, workspace, lambda _: "yes"))
+        receipt = json.loads(r.approval_path(self.home, "config").read_text())
+        self.assertIsNone(receipt["base"])
+        self.assertEqual(Path(receipt["backup"]).read_bytes(), original)
+        self.activate("", new)
+        self.assertEqual(self.live.read_bytes(), candidate)
+        next_gen = self.generation("next", b"shared=3\n")
+        self.activate(new, next_gen)
+        self.assertEqual(self.live.read_bytes(), b"shared=3\nlocal=keep\n")
+
+    def test_absent_baseline_approval_invalidated_when_empty_baseline_appears(self):
+        old = self.generation("old", None)
+        new = self.generation("new", b"declared")
+        self.live.write_bytes(b"local")
+        workspace = r.export_conflict(self.home, old, new, "config")
+        r.resolve(self.home, old, new, "config")
+        (Path(old) / "home-files/config").write_bytes(b"")
+        with self.assertRaisesRegex(r.Divergence, "inputs changed"):
+            r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+        before = r.snapshot(self.live)
         with self.assertRaises(r.Divergence):
-            self.activate("", self.generation("new", b"same"))
-        self.assertEqual(self.live.read_bytes(), b"same")
+            self.activate(old, new)
+        self.assertEqual(r.snapshot(self.live), before)
+
+    def test_initial_adoption_preserves_file_safety_checks(self):
+        new = self.generation("new", b"same")
+        self.live.write_bytes(b"same")
+        for mode in (0o400, 0o700, 0o1600):
+            with self.subTest(mode=mode):
+                self.live.chmod(mode)
+                with self.assertRaises(r.Divergence):
+                    self.activate("", new)
+                with self.assertRaises(r.Divergence):
+                    r.resolve(self.home, "", new, "config")
+        self.live.chmod(0o600)
+        self.live.unlink()
+        self.live.symlink_to(Path(new) / "home-files/config")
+        with self.assertRaises(r.Divergence):
+            self.activate("", new)
+        with self.assertRaises(r.Divergence):
+            r.resolve(self.home, "", new, "config")
+
+    def test_no_baseline_never_means_empty_text_or_json_null(self):
+        for live, desired in ((b"", b"new"), (b"local", b""), (b"old", b"new")):
+            with self.subTest(live=live, desired=desired), self.assertRaises(r.Divergence):
+                r.merge(None, live, desired)
+        for live, desired in ((b"null", b"{}"), (b"{}", b"null"),
+                              (b"[1]", b"[2]"), (b'{"key":1}', b'{"key":true}')):
+            with self.subTest(live=live, desired=desired), self.assertRaises(r.Divergence):
+                r.merge(None, live, desired, "config.json")
+        self.assertEqual(r.merge(None, b"null", b"null", "config.json"), b"null")
+        self.assertEqual(r.merge(None, b"[1]", b"[1]", "config.json"), b"[1]")
+        self.assertEqual(json.loads(r.merge(None, b'{"nested":{"a":1}}',
+                                          b'{"nested":{"b":2}}', "config.json")),
+                         {"nested": {"a": 1, "b": 2}})
+        with self.assertRaises(r.Divergence):
+            r.merge(None, b'{"a":1,"a":2}', b'{}', "config.json")
 
     def test_all_divergences_reported_without_returning_or_applying_partial_plan(self):
         old = self.generation("old", b"theme=light\n")
@@ -438,11 +535,12 @@ class Reconciliation(unittest.TestCase):
             self.activate(old, new)
         self.assertEqual(self.live.read_bytes(), b"size=13\n")
 
-    def test_resolution_rejects_foreign_and_symlink_files(self):
+    def test_resolution_adopts_regular_but_rejects_symlink_files(self):
         new = self.generation("new", b"size=20\n")
         self.live.write_bytes(b"size=12\n")
-        with self.assertRaises(r.Divergence):
-            r.resolve(self.home, "", new, "config", replace=True)
+        r.resolve(self.home, "", new, "config", replace=True)
+        self.activate("", new)
+        self.assertEqual(self.live.read_bytes(), b"size=20\n")
         old = self.generation("old", b"size=14\n")
         self.live.unlink()
         self.live.symlink_to(Path(old) / "home-files/config")

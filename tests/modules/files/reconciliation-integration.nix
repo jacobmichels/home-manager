@@ -176,15 +176,20 @@ pkgs.runCommand "reconciliation-integration"
     grep -q 'local=kept' "$HOME/config"
     ${activate first} ${generation conflict}
     cmp "$HOME/config" ${first.home-files}/config
-    # First activation must fail for a foreign file before any other file is linked.
+    # Different text without a baseline must fail before any other file is linked.
     export HOME="$TMPDIR/foreign"
     mkdir "$HOME"
     echo foreign > "$HOME/config"
     if ${activate first} "" > "$TMPDIR/log" 2>&1; then exit 1; fi
-    grep -q 'No previous generated file is available' "$TMPDIR/log"
+    grep -q 'No reconciled baseline is available' "$TMPDIR/log"
     grep -q foreign "$HOME/config"
     test ! -e "$HOME/write-boundary"
     test ! -e "$HOME/static"
+    ${generation first}/reconcile --replace config
+    ${activate first} ""
+    cmp "$HOME/config" ${first.home-files}/config
+    test -e "$HOME/write-boundary"
+    test -L "$HOME/static"
     # Existing symlink behavior, followed by migration to a writable file.
     export HOME="$TMPDIR/immutable"
     mkdir "$HOME"
