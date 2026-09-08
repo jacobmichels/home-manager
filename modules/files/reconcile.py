@@ -32,18 +32,18 @@ def resolution_guidance(old, new, name):
         "To resolve:",
         "  Stop applications writing this file and back up the live file before editing.",
     ]
-    if baseline is not None and baseline.is_file():
+    if name in manifest(old) and baseline is not None and baseline.is_file():
         lines += [f"  Previous generated file: {baseline}"]
     else:
         lines += [
-            "  No previous generated file is available; existing files are not adopted automatically."
+            "  No reconciled baseline is available; review live and desired contents for initial adoption."
         ]
     if desired.is_file():
         lines += [f"  New desired file: {desired}"]
     lines += [
         "  For content conflicts, choose one:",
         "    Keep local edits: undo the conflicting Nix change, or update the declaration to match the live contents.",
-        "    Accept Nix: for an existing reconciled regular file, choose ONE:",
+        "    Accept Nix: for an existing regular file, choose ONE:",
         "      Replace the entire file with declared contents:",
         f"        {shlex.quote(str(Path(new) / 'reconcile'))} --replace {shlex.quote(name)}",
         "      This command back up the live file and approve only this exact file state for the next activation.",
@@ -52,7 +52,6 @@ def resolution_guidance(old, new, name):
         "      Edit candidate in the printed workspace, then review and approve:",
         f"        {shlex.quote(str(Path(new) / 'reconcile'))} --accept WORKSPACE",
         "  Fix any file-type, ownership, or permission issue reported above first; matching contents does not bypass these checks.",
-        "  With no reconciled baseline, move a foreign file aside before retrying, even if its contents match.",
         "  Then rerun your usual Home Manager/NixOS activation command.",
         "  Failed activation does not advance the Home Manager baseline. Changing the live file or either generated version invalidates approval.",
     ]
@@ -185,8 +184,9 @@ def json_equal(left, right):
 
 
 def merge_json(base, live, desired):
-    a, b, c = map(parse_json, (base, live, desired))
     missing = object()
+    a = missing if base is None else parse_json(base)
+    b, c = map(parse_json, (live, desired))
 
     def combine(a, b, c, path=""):
         if json_equal(b, a):
@@ -241,6 +241,13 @@ def merge_json(base, live, desired):
 def merge(base, live, desired, name=""):
     if name.endswith(".json"):
         return merge_json(base, live, desired)
+    if base is None:
+        validate_text(live, desired)
+        if live == desired:
+            return live
+        raise Divergence(
+            "text differs without a reconciled baseline; approve a resolution"
+        )
     validate_text(base, live, desired)
     if live == base:
         return desired
@@ -311,7 +318,7 @@ def merge(base, live, desired, name=""):
 
 
 def digest(data):
-    return hashlib.sha256(data).hexdigest()
+    return None if data is None else hashlib.sha256(data).hexdigest()
 
 
 def approval_path(home, name):
@@ -470,24 +477,28 @@ def approved_result(home, name, state, base, desired):
 def resolution_inputs(home, old, new, filename):
     name = os.path.relpath(filename, home) if os.path.isabs(filename) else filename
     path = target(home, name)
-    if name not in manifest(old) or name not in manifest(new):
+    if name not in manifest(new):
         raise Divergence(
-            "Explicit resolution requires an existing reconciled file in both generations."
+            "Explicit resolution requires a reconciled declaration in the desired generation."
         )
     state = snapshot(path)
     if state is None or "data" not in state or not state["mode"] & stat.S_IWUSR:
         raise Divergence(
             "Explicit resolution requires an owner-writable regular live file."
         )
-    base_path = Path(old) / "home-files" / name
+    base_path = Path(old) / "home-files" / name if old else None
     desired_path = Path(new) / "home-files" / name
-    if os.access(base_path, os.X_OK) != os.access(desired_path, os.X_OK):
+    has_base = name in manifest(old) and base_path is not None and base_path.is_file()
+    if os.access(base_path if has_base else path, os.X_OK) != os.access(
+        desired_path, os.X_OK
+    ):
         raise Divergence(
             "Resolve executable-mode changes before accepting content changes."
         )
-    base, desired = base_path.read_bytes(), desired_path.read_bytes()
+    base = base_path.read_bytes() if has_base else None
+    desired = desired_path.read_bytes()
     live = base64.b64decode(state["data"])
-    validate_text(base, live, desired)
+    validate_text(base if base is not None else b"", live, desired)
     if name.endswith(".json"):
         parse_json(desired)
     return name, state, base, live, desired
@@ -575,7 +586,7 @@ def export_conflict(home, old, new, filename):
         "before": state,
         "base": digest(base),
         "desired": digest(desired),
-        "old": str(Path(old).resolve()),
+        "old": str(Path(old).resolve()) if old else "",
         "new": str(Path(new).resolve()),
     }
     for filename, data in (
@@ -584,6 +595,8 @@ def export_conflict(home, old, new, filename):
         ("declared", desired),
         ("candidate", live),
     ):
+        if data is None:
+            continue
         with (workspace / filename).open("xb") as stream:
             os.chmod(stream.fileno(), 0o600)
             stream.write(data)
@@ -595,6 +608,8 @@ def export_conflict(home, old, new, filename):
         "Edit candidate, then run reconcile --accept WORKSPACE to review and approve.\n"
         "These files may contain secrets. Nothing has been sent to an agent."
     )
+    if base is None:
+        print("No reconciled baseline is available; this workspace has no base file.")
     return workspace
 
 
@@ -612,7 +627,7 @@ def accept_conflict(home, old, new, directory, confirm=None):
     inputs = resolution_inputs(home, old, new, metadata["name"])
     name, state, base, live, desired = inputs
     if (
-        metadata["old"] != str(Path(old).resolve())
+        metadata["old"] != (str(Path(old).resolve()) if old else "")
         or metadata["new"] != str(Path(new).resolve())
         or metadata["before"] != state
         or metadata["base"] != digest(base)
@@ -713,16 +728,19 @@ def check(home, old, new):
                 base = base_path.read_bytes()
                 result = merge(base, base, desired, name)
             else:
-                if name not in previous or not base_path.is_file():
-                    raise Divergence("existing file has no reconciled baseline")
-                if os.access(base_path, os.X_OK) != os.access(desired_path, os.X_OK):
+                has_base = (
+                    name in previous and base_path is not None and base_path.is_file()
+                )
+                if os.access(base_path if has_base else path, os.X_OK) != os.access(
+                    desired_path, os.X_OK
+                ):
                     raise Divergence(
                         "declarative executable-mode change requires manual reconciliation"
                     )
                 mode = state["mode"]
                 if not mode & stat.S_IWUSR:
                     raise Divergence("live file is not owner-writable")
-                base = base_path.read_bytes()
+                base = base_path.read_bytes() if has_base else None
                 live = base64.b64decode(state["data"])
                 approval = approved_result(home, name, state, base, desired)
                 result = (
