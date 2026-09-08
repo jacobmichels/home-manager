@@ -280,6 +280,35 @@ class Reconciliation(unittest.TestCase):
             self.activate("", self.generation("new", b"same"))
         self.assertEqual(self.live.read_bytes(), b"same")
 
+    def test_all_divergences_reported_without_returning_or_applying_partial_plan(self):
+        old = self.generation("old", b"theme=light\n")
+        new = self.generation("new", b"theme=catppuccin\n")
+        self.live.write_bytes(b"theme=dark\n")
+        foreign = self.home / "zzz.toml"
+        foreign.write_bytes(b"local=true\n")
+        for name, contents in (("aaa", b"create me"), ("broken.json", b"{invalid"),
+                               ("zzz.toml", b"declared=true\n")):
+            (Path(new) / "home-files" / name).write_bytes(contents)
+        (Path(new) / "reconciliation.json").write_text(
+            json.dumps(["aaa", "broken.json", "config", "zzz.toml"]))
+        before = {path: r.snapshot(path) for path in (self.live, foreign)}
+        with self.assertRaises(r.Divergence) as caught:
+            self.activate(old, new)
+        for name in ("broken.json", "config", "zzz.toml"):
+            self.assertIn(f"DIVERGENCE: {self.home / name}\n", str(caught.exception))
+        self.assertEqual(str(caught.exception).count("To resolve:"), 3)
+        self.assertFalse((self.home / "aaa").exists())
+        self.assertFalse((self.home / "broken.json").exists())
+        self.assertFalse((self.home / ".local").exists())
+        self.assertEqual({path: r.snapshot(path) for path in before}, before)
+
+        result = subprocess.run([sys.executable, r.__file__, "check", str(self.home), old, new],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        for name in ("broken.json", "config", "zzz.toml"):
+            self.assertIn(f"DIVERGENCE: {self.home / name}\n", result.stderr)
+
     def test_symlink_migration(self):
         old = self.generation("old", b"old", False)
         self.live.symlink_to(Path(old) / "home-files/config")
