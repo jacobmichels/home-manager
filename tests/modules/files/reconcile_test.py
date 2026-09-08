@@ -41,13 +41,140 @@ class Reconciliation(unittest.TestCase):
             with self.assertRaises(r.Divergence):
                 r.snapshot(self.live)
 
-    def generation(self, name, text, mutable=True):
+    def generation(self, name, text, mutable=True, filename="config"):
         gen = self.root / name
         (gen / "home-files").mkdir(parents=True)
         if text is not None:
-            (gen / "home-files/config").write_bytes(text)
-        (gen / "reconciliation.json").write_text(json.dumps(["config"] if mutable else []))
+            path = gen / "home-files" / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(text)
+        (gen / "reconciliation.json").write_text(json.dumps([filename] if mutable else []))
         return str(gen)
+
+    def test_json_target_activation_preserves_local_mcp_settings(self):
+        for filename in (".claude.json", ".omp/agent/mcp.json"):
+            with self.subTest(filename=filename):
+                old = self.generation("old" + Path(filename).stem,
+                                      b'{"mcpServers":{"shared":{"url":"old"}}}', filename=filename)
+                new = self.generation("new" + Path(filename).stem,
+                                      b'{"mcpServers":{"shared":{"url":"new"}}}', filename=filename)
+                live = self.home / filename
+                live.parent.mkdir(parents=True, exist_ok=True)
+                live.write_bytes(b'{"auth":"local", "mcpServers": {"local":{"command":"local"},'
+                                 b'"shared":{"url":"old"}}}')
+                live.chmod(0o640)
+                self.activate(old, new)
+                self.assertEqual(json.loads(live.read_bytes()), {
+                    "auth": "local", "mcpServers": {
+                        "local": {"command": "local"}, "shared": {"url": "new"}}})
+                self.assertEqual(live.stat().st_mode & 0o777, 0o640)
+
+    def test_json_creation_and_symlink_migration_validate_inputs(self):
+        new = self.generation("new", b'{"value":2}\n', filename="config.json")
+        live = self.home / "config.json"
+        self.activate("", new)
+        self.assertEqual(live.read_bytes(), b'{"value":2}\n')
+        live.unlink()
+        old = self.generation("old", b'{"value":1}', False, "config.json")
+        live.symlink_to(Path(old) / "home-files/config.json")
+        self.activate(old, new)
+        self.assertFalse(live.is_symlink())
+        self.assertEqual(live.read_bytes(), b'{"value":2}\n')
+        live.unlink()
+        (Path(new) / "home-files/config.json").write_bytes(b'{broken')
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            self.activate("", new)
+        self.assertFalse(live.exists())
+        live.symlink_to(Path(old) / "home-files/config.json")
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            self.activate(old, new)
+        self.assertTrue(live.is_symlink())
+
+    def test_json_conflicts_and_invalid_inputs_stop_before_any_write(self):
+        old = self.generation("old", b'{"key":1}', filename="config.json")
+        new = self.generation("new", b'{"key":2}', filename="config.json")
+        (Path(new) / "home-files/aaa").write_bytes(b"create me")
+        (Path(new) / "reconciliation.json").write_text('["aaa", "config.json"]')
+        live = self.home / "config.json"
+        for contents in (b'{"key":3}', b'{broken', b'{"key":1,"key":4}'):
+            with self.subTest(contents=contents):
+                live.write_bytes(contents)
+                before = r.snapshot(live)
+                with self.assertRaises(r.Divergence):
+                    self.activate(old, new)
+                self.assertEqual(r.snapshot(live), before)
+                self.assertFalse((self.home / "aaa").exists())
+
+    def test_json_resolution_rejects_invalid_results_and_repairs_invalid_live(self):
+        old = self.generation("old", b'{"key":1}', filename="config.json")
+        new = self.generation("new", b'{"key":2}', filename="config.json")
+        live = self.home / "config.json"
+        live.write_bytes(b'{broken')
+        workspace = r.export_conflict(self.home, old, new, "config.json")
+        confirm = mock.Mock(return_value="yes")
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            r.accept_conflict(self.home, old, new, workspace, confirm)
+        confirm.assert_not_called()
+        self.assertFalse(r.approval_path(self.home, "config.json").exists())
+        self.assertEqual(list(self.home.glob("*.hm-backup-*")), [])
+        (workspace / "candidate").write_bytes(b'{"key":2,"local":true}')
+        self.assertTrue(r.accept_conflict(self.home, old, new, workspace, confirm))
+        self.activate(old, new)
+        self.assertEqual(live.read_bytes(), b'{"key":2,"local":true}')
+
+        (Path(new) / "home-files/config.json").write_bytes(b'{invalid')
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            r.resolve(self.home, old, new, "config.json")
+        (Path(new) / "home-files/config.json").write_bytes(b'{"key":2}')
+        r.resolve(self.home, old, new, "config.json")
+        # Approvals from an older reconciler must also pass JSON validation.
+        receipt_path = r.approval_path(self.home, "config.json")
+        receipt = json.loads(receipt_path.read_text())
+        receipt["result"] = r.encode(b'{invalid')
+        receipt_path.write_text(json.dumps(receipt))
+        before = r.snapshot(live)
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            self.activate(old, new)
+        self.assertEqual(r.snapshot(live), before)
+        r.resolve(self.home, old, new, "config.json")
+        self.activate(old, new)
+        self.assertEqual(live.read_bytes(), b'{"key":2}')
+
+    def test_json_resolution_cannot_advance_invalid_desired_baseline(self):
+        old = self.generation("old", b'{"key":1}', filename="config.json")
+        new = self.generation("new", b'{invalid', filename="config.json")
+        live = self.home / "config.json"
+        live.write_bytes(b'{"key":3}')
+        before = r.snapshot(live)
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            r.export_conflict(self.home, old, new, "config.json")
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            r.resolve(self.home, old, new, "config.json")
+        self.assertFalse((self.home / ".local").exists())
+        self.assertEqual(list(self.home.glob("*.hm-backup-*")), [])
+
+        desired_path = Path(new) / "home-files/config.json"
+        desired_path.write_bytes(b'{"key":2}')
+        workspace = r.export_conflict(self.home, old, new, "config.json")
+        (workspace / "candidate").write_bytes(b'{"key":2,"local":true}')
+        desired_path.write_bytes(b'{invalid')
+        confirm = mock.Mock(return_value="yes")
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            r.accept_conflict(self.home, old, new, workspace, confirm)
+        confirm.assert_not_called()
+        self.assertFalse(r.approval_path(self.home, "config.json").exists())
+
+        desired_path.write_bytes(b'{"key":2}')
+        r.resolve(self.home, old, new, "config.json")
+        # Model a legacy receipt for a valid candidate but an invalid desired file.
+        receipt_path = r.approval_path(self.home, "config.json")
+        receipt = json.loads(receipt_path.read_text())
+        desired_path.write_bytes(b'{invalid')
+        receipt["desired"] = r.digest(b'{invalid')
+        receipt_path.write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(r.Divergence, "invalid JSON"):
+            self.activate(old, new)
+        self.assertEqual(r.snapshot(live), before)
 
     def activate(self, old, new):
         r.apply(self.home, r.check(self.home, old, new))
@@ -147,11 +274,137 @@ class Reconciliation(unittest.TestCase):
         self.assertEqual(r.snapshot(self.live), before)
         self.assertFalse((self.home / "aaa").exists())
 
-    def test_foreign_file_even_identical(self):
+    def test_initial_identical_text_is_adopted_without_rewriting(self):
         self.live.write_bytes(b"same")
+        before = r.snapshot(self.live)
+        self.activate("", self.generation("new", b"same"))
+        self.assertEqual(r.snapshot(self.live), before)
+
+    def test_json_adoption_without_history_and_subsequent_three_way_merge(self):
+        filename = ".claude.json"
+        live = self.home / filename
+        for index, kind in enumerate(("first", "unmanaged", "missing")):
+            with self.subTest(kind=kind):
+                old = "" if kind == "first" else self.generation(
+                    "old" + kind, b'{"shared":0}' if kind == "unmanaged" else None,
+                    mutable=kind != "unmanaged", filename=filename)
+                new = self.generation("new" + kind, b'{"shared":1}', filename=filename)
+                live.write_bytes(b'{"local":{"token":"keep"}}')
+                live.chmod(0o640)
+                self.activate(old, new)
+                self.assertEqual(json.loads(live.read_bytes()), {"shared": 1, "local": {"token": "keep"}})
+                self.assertEqual(live.stat().st_mode & 0o777, 0o640)
+                next_gen = self.generation("next" + kind, b'{"shared":2}', filename=filename)
+                self.activate(new, next_gen)
+                self.assertEqual(json.loads(live.read_bytes()), {"shared": 2, "local": {"token": "keep"}})
+
+    def test_initial_json_conflicts_preserve_local_file(self):
+        new = self.generation("new", b'{"shared":1}', filename="config.json")
+        live = self.home / "config.json"
+        live.write_bytes(b'{"shared":2,"local":true}')
+        before = r.snapshot(live)
+        with self.assertRaisesRegex(r.Divergence, "conflicting JSON edits"):
+            self.activate("", new)
+        self.assertEqual(r.snapshot(live), before)
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_initial_candidate_resolution_preserves_settings_and_binds_missing_baseline(self):
+        new = self.generation("new", b"shared=1\n")
+        original = b"shared=2\nlocal=keep\n"
+        self.live.write_bytes(original)
+        workspace = r.export_conflict(self.home, "", new, "config")
+        self.assertFalse((workspace / "base").exists())
+        metadata = json.loads(workspace.with_suffix(".json").read_text())
+        self.assertIsNone(metadata["base"])
+        self.assertEqual(metadata["old"], "")
+        candidate = b"shared=1\nlocal=keep\n"
+        (workspace / "candidate").write_bytes(candidate)
+        self.assertTrue(r.accept_conflict(self.home, "", new, workspace, lambda _: "yes"))
+        receipt = json.loads(r.approval_path(self.home, "config").read_text())
+        self.assertIsNone(receipt["base"])
+        self.assertEqual(Path(receipt["backup"]).read_bytes(), original)
+        self.activate("", new)
+        self.assertEqual(self.live.read_bytes(), candidate)
+        next_gen = self.generation("next", b"shared=3\n")
+        self.activate(new, next_gen)
+        self.assertEqual(self.live.read_bytes(), b"shared=3\nlocal=keep\n")
+
+    def test_absent_baseline_approval_invalidated_when_empty_baseline_appears(self):
+        old = self.generation("old", None)
+        new = self.generation("new", b"declared")
+        self.live.write_bytes(b"local")
+        workspace = r.export_conflict(self.home, old, new, "config")
+        r.resolve(self.home, old, new, "config")
+        (Path(old) / "home-files/config").write_bytes(b"")
+        with self.assertRaisesRegex(r.Divergence, "inputs changed"):
+            r.accept_conflict(self.home, old, new, workspace, lambda _: "yes")
+        before = r.snapshot(self.live)
         with self.assertRaises(r.Divergence):
-            self.activate("", self.generation("new", b"same"))
-        self.assertEqual(self.live.read_bytes(), b"same")
+            self.activate(old, new)
+        self.assertEqual(r.snapshot(self.live), before)
+
+    def test_initial_adoption_preserves_file_safety_checks(self):
+        new = self.generation("new", b"same")
+        self.live.write_bytes(b"same")
+        for mode in (0o400, 0o700, 0o1600):
+            with self.subTest(mode=mode):
+                self.live.chmod(mode)
+                with self.assertRaises(r.Divergence):
+                    self.activate("", new)
+                with self.assertRaises(r.Divergence):
+                    r.resolve(self.home, "", new, "config")
+        self.live.chmod(0o600)
+        self.live.unlink()
+        self.live.symlink_to(Path(new) / "home-files/config")
+        with self.assertRaises(r.Divergence):
+            self.activate("", new)
+        with self.assertRaises(r.Divergence):
+            r.resolve(self.home, "", new, "config")
+
+    def test_no_baseline_never_means_empty_text_or_json_null(self):
+        for live, desired in ((b"", b"new"), (b"local", b""), (b"old", b"new")):
+            with self.subTest(live=live, desired=desired), self.assertRaises(r.Divergence):
+                r.merge(None, live, desired)
+        for live, desired in ((b"null", b"{}"), (b"{}", b"null"),
+                              (b"[1]", b"[2]"), (b'{"key":1}', b'{"key":true}')):
+            with self.subTest(live=live, desired=desired), self.assertRaises(r.Divergence):
+                r.merge(None, live, desired, "config.json")
+        self.assertEqual(r.merge(None, b"null", b"null", "config.json"), b"null")
+        self.assertEqual(r.merge(None, b"[1]", b"[1]", "config.json"), b"[1]")
+        self.assertEqual(json.loads(r.merge(None, b'{"nested":{"a":1}}',
+                                          b'{"nested":{"b":2}}', "config.json")),
+                         {"nested": {"a": 1, "b": 2}})
+        with self.assertRaises(r.Divergence):
+            r.merge(None, b'{"a":1,"a":2}', b'{}', "config.json")
+
+    def test_all_divergences_reported_without_returning_or_applying_partial_plan(self):
+        old = self.generation("old", b"theme=light\n")
+        new = self.generation("new", b"theme=catppuccin\n")
+        self.live.write_bytes(b"theme=dark\n")
+        foreign = self.home / "zzz.toml"
+        foreign.write_bytes(b"local=true\n")
+        for name, contents in (("aaa", b"create me"), ("broken.json", b"{invalid"),
+                               ("zzz.toml", b"declared=true\n")):
+            (Path(new) / "home-files" / name).write_bytes(contents)
+        (Path(new) / "reconciliation.json").write_text(
+            json.dumps(["aaa", "broken.json", "config", "zzz.toml"]))
+        before = {path: r.snapshot(path) for path in (self.live, foreign)}
+        with self.assertRaises(r.Divergence) as caught:
+            self.activate(old, new)
+        for name in ("broken.json", "config", "zzz.toml"):
+            self.assertIn(f"DIVERGENCE: {self.home / name}\n", str(caught.exception))
+        self.assertEqual(str(caught.exception).count("To resolve:"), 3)
+        self.assertFalse((self.home / "aaa").exists())
+        self.assertFalse((self.home / "broken.json").exists())
+        self.assertFalse((self.home / ".local").exists())
+        self.assertEqual({path: r.snapshot(path) for path in before}, before)
+
+        result = subprocess.run([sys.executable, r.__file__, "check", str(self.home), old, new],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        for name in ("broken.json", "config", "zzz.toml"):
+            self.assertIn(f"DIVERGENCE: {self.home / name}\n", result.stderr)
 
     def test_symlink_migration(self):
         old = self.generation("old", b"old", False)
@@ -282,11 +535,12 @@ class Reconciliation(unittest.TestCase):
             self.activate(old, new)
         self.assertEqual(self.live.read_bytes(), b"size=13\n")
 
-    def test_resolution_rejects_foreign_and_symlink_files(self):
+    def test_resolution_adopts_regular_but_rejects_symlink_files(self):
         new = self.generation("new", b"size=20\n")
         self.live.write_bytes(b"size=12\n")
-        with self.assertRaises(r.Divergence):
-            r.resolve(self.home, "", new, "config", replace=True)
+        r.resolve(self.home, "", new, "config", replace=True)
+        self.activate("", new)
+        self.assertEqual(self.live.read_bytes(), b"size=20\n")
         old = self.generation("old", b"size=14\n")
         self.live.unlink()
         self.live.symlink_to(Path(old) / "home-files/config")
@@ -669,6 +923,90 @@ class Reconciliation(unittest.TestCase):
         receipt_path.write_text(json.dumps(receipt))
         with self.assertRaises(r.Divergence):
             self.activate(old, new)
+
+
+class JsonMerge(unittest.TestCase):
+    def test_independent_object_edits(self):
+        cases = [
+            ({"a": 1, "b": 2}, {"a": 3, "b": 2}, {"a": 1, "b": 4}, {"a": 3, "b": 4}),
+            ({"nested": {"a": 1}}, {"nested": {"a": 1, "b": 2}},
+             {"nested": {"a": 3}}, {"nested": {"a": 3, "b": 2}}),
+            ({}, {"nested": {"local": True}}, {"nested": {"nix": True}},
+             {"nested": {"local": True, "nix": True}}),
+            ({"a": 1, "b": 2}, {"b": 2}, {"a": 1, "b": 3}, {"b": 3}),
+            ({"a": 1, "b": 2}, {"a": 3, "b": 2}, {"a": 1}, {"a": 3}),
+            ({"a": None}, {}, {}, {}),
+            ({}, {"a": None}, {"b": 2}, {"a": None, "b": 2}),
+            ({"a": 1}, {"a": None}, {"a": 1, "b": 2}, {"a": None, "b": 2}),
+            ({"a": [1]}, {"a": [1, 2]}, {"a": [1], "b": 3}, {"a": [1, 2], "b": 3}),
+            ({"a": [1]}, {"a": [2]}, {"a": [2]}, {"a": [2]}),
+            ({"a": 1}, {"a": {"b": 2}}, {"a": 1}, {"a": {"b": 2}}),
+            (None, True, None, True),
+            ([1], [1, 2], [1], [1, 2]),
+        ]
+        for base, live, desired, expected in cases:
+            with self.subTest(base=base, live=live, desired=desired):
+                inputs = [json.dumps(value).encode() for value in (base, live, desired)]
+                self.assertEqual(json.loads(r.merge(*inputs, name="config.json")), expected)
+
+    def test_conflicting_values_deletions_types_and_arrays(self):
+        cases = [
+            ({"a": 1}, {"a": 2}, {"a": 3}),
+            ({"a": 1}, {}, {"a": 2}),
+            ({"a": 1}, {"a": 2}, {}),
+            ({"a": {"b": 1}}, {}, {"a": {"b": 2}}),
+            ({"a": None}, {}, {"a": 2}),
+            ({}, {"a": None}, {"a": 2}),
+            ({"a": 0}, {"a": {"b": 1}}, {"a": {"c": 2}}),
+            ({"a": [1]}, {"a": [1, 2]}, {"a": [1, 3]}),
+            ({"a": [1, 2]}, {"a": [3, 2]}, {"a": [1, 4]}),
+            ({"a": True}, {"a": 1}, {"a": 2}),
+            ({"a": [True]}, {"a": [1]}, {"a": [2]}),
+            (True, 1, 2),
+        ]
+        for base, live, desired in cases:
+            with self.subTest(base=base, live=live, desired=desired):
+                inputs = [json.dumps(value).encode() for value in (base, live, desired)]
+                with self.assertRaisesRegex(r.Divergence, "conflicting JSON edits"):
+                    r.merge(*inputs, name="config.json")
+
+    def test_formatting_and_object_order_are_not_edits(self):
+        base = b'{"a":1,"nested":{"b":2,"c":3}}'
+        live = b'{\n  "nested": {"c": 3, "b": 2},\n  "a": 1\n}\n'
+        self.assertEqual(r.merge(base, live, base, "config.json"), live)
+        desired = b'{"a":4,"nested":{"b":2,"c":3}}\n'
+        self.assertEqual(r.merge(base, live, desired, "config.json"), desired)
+        self.assertEqual(r.merge(base, desired, desired, "config.json"), desired)
+
+    def test_number_precision_survives_unrelated_edits(self):
+        base = b'{"a":1}'
+        live = b'{"a":1,"precise":0.123456789012345678901,"big":1e400,"int":9007199254740993}'
+        result = r.merge(base, live, b'{"a":2}', "config.json")
+        self.assertIn(b"0.123456789012345678901", result)
+        self.assertIn(b"1E+400", result)
+        self.assertIn(b"9007199254740993", result)
+        self.assertEqual(r.parse_json(result)["a"], 2)
+        self.assertEqual(r.merge(b'1', b'1.0', b'1e0', "config.json"), b'1.0')
+
+    def test_all_inputs_are_validated_even_when_bytes_match(self):
+        invalid = [b'', b'{broken', b'{"a":1,"a":2}', b'{"a":{"b":1,"b":2}}',
+                   b'{"a":NaN}', b'Infinity', b'-Infinity', b'{} trailing', b'\xff', b'"\x00"']
+        for value in invalid:
+            for inputs in ((value, value, value), (value, b'{}', b'{}'),
+                           (b'{}', value, b'{}'), (b'{}', b'{}', value)):
+                with self.subTest(inputs=inputs), self.assertRaises(r.Divergence):
+                    r.merge(*inputs, name="config.json")
+
+    def test_conflict_reports_escaped_pointer_without_values(self):
+        inputs = [json.dumps({"a/b~": value}).encode() for value in ("base", "secret1", "secret2")]
+        with self.assertRaisesRegex(r.Divergence, "JSON pointer '/a~1b~0'") as caught:
+            r.merge(*inputs, name="config.json")
+        self.assertNotIn("secret", str(caught.exception))
+
+    def test_other_suffixes_keep_text_merging(self):
+        for name in ("config", "config.toml", "config.jsonc", "config.json.backup"):
+            with self.subTest(name=name):
+                self.assertEqual(r.merge(b'old', b'old', b'not JSON', name), b'not JSON')
 
 
 if __name__ == "__main__":
