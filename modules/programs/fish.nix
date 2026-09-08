@@ -398,6 +398,7 @@ let
   fishIndent =
     name: text:
     pkgs.runCommand name {
+      preferLocalBuild = true;
       nativeBuildInputs = [ cfg.package ];
       inherit text;
       passAsFile = [ "text" ];
