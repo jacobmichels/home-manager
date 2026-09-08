@@ -11,6 +11,7 @@ from decimal import Decimal
 import errno
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -18,6 +19,8 @@ import shlex
 import sys
 import tempfile
 import time
+
+import tomlkit
 
 
 class Divergence(Exception):
@@ -183,35 +186,30 @@ def json_equal(left, right):
     return left == right
 
 
+def merge_values(a, b, c, missing, equal, format_name, path=""):
+    if equal(b, a):
+        return c
+    if equal(c, a) or equal(b, c):
+        return b
+    if isinstance(b, dict) and isinstance(c, dict) and (isinstance(a, dict) or a is missing):
+        a = {} if a is missing else a
+        result = {}
+        for key in sorted(a.keys() | b.keys() | c.keys()):
+            pointer = path + "/" + key.replace("~", "~0").replace("/", "~1")
+            value = merge_values(
+                a.get(key, missing), b.get(key, missing), c.get(key, missing),
+                missing, equal, format_name, pointer,
+            )
+            if value is not missing:
+                result[key] = value
+        return result
+    raise Divergence(f"conflicting {format_name} edits at JSON pointer {ascii(path)}")
+
+
 def merge_json(base, live, desired):
     missing = object()
     a = missing if base is None else parse_json(base)
     b, c = map(parse_json, (live, desired))
-
-    def combine(a, b, c, path=""):
-        if json_equal(b, a):
-            return c
-        if json_equal(c, a) or json_equal(b, c):
-            return b
-        if (
-            isinstance(b, dict)
-            and isinstance(c, dict)
-            and (isinstance(a, dict) or a is missing)
-        ):
-            a = {} if a is missing else a
-            result = {}
-            for key in sorted(a.keys() | b.keys() | c.keys()):
-                pointer = path + "/" + key.replace("~", "~0").replace("/", "~1")
-                value = combine(
-                    a.get(key, missing),
-                    b.get(key, missing),
-                    c.get(key, missing),
-                    pointer,
-                )
-                if value is not missing:
-                    result[key] = value
-            return result
-        raise Divergence(f"conflicting JSON edits at JSON pointer {ascii(path)}")
 
     def render(value):
         # Decimal avoids rounding local numbers when another key changes.
@@ -229,7 +227,7 @@ def merge_json(base, live, desired):
             return "[" + ", ".join(map(render, value)) + "]"
         return json.dumps(value)
 
-    result = combine(a, b, c)
+    result = merge_values(a, b, c, missing, json_equal, "JSON")
     # Keep existing formatting when no combined document needs to be written.
     if json_equal(result, b):
         return live
@@ -238,9 +236,72 @@ def merge_json(base, live, desired):
     return (render(result) + "\n").encode("utf-8")
 
 
+def parse_toml(data):
+    validate_text(data)
+    try:
+        return tomlkit.parse(data.decode("utf-8"))
+    except (ValueError, ArithmeticError, RecursionError) as error:
+        # Parser messages can contain configuration secrets.
+        raise Divergence("invalid TOML") from error
+
+
+def toml_equal(left, right):
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            toml_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(map(toml_equal, left, right))
+    if isinstance(left, float):
+        if math.isnan(left) and math.isnan(right):
+            return True
+        if left == right == 0.0:
+            return math.copysign(1.0, left) == math.copysign(1.0, right)
+    return left == right
+
+
+def merge_toml(base, live, desired):
+    missing = object()
+    a = missing if base is None else parse_toml(base).unwrap()
+    live_doc, desired_doc = map(parse_toml, (live, desired))
+    b, c = live_doc.unwrap(), desired_doc.unwrap()
+    result = merge_values(a, b, c, missing, toml_equal, "TOML")
+    if toml_equal(result, b):
+        return live
+
+    def update(document, before, after):
+        for key in before.keys() - after.keys():
+            del document[key]
+        for key, value in after.items():
+            if key in before and toml_equal(before[key], value):
+                continue
+            if key in before and isinstance(before[key], dict) and isinstance(value, dict):
+                update(document[key], before[key], value)
+            else:
+                document[key] = value
+
+    update(live_doc, b, result)
+    encoded = tomlkit.dumps(live_doc).encode("utf-8")
+    # Editing dotted keys and inline tables must still yield the intended data.
+    if not toml_equal(parse_toml(encoded).unwrap(), result):
+        raise Divergence("TOML serialization changed merged values")
+    return encoded
+
+
+def validate_format(name, data):
+    if name.endswith(".json"):
+        parse_json(data)
+    elif name.endswith(".toml"):
+        parse_toml(data)
+
+
 def merge(base, live, desired, name=""):
     if name.endswith(".json"):
         return merge_json(base, live, desired)
+    if name.endswith(".toml"):
+        return merge_toml(base, live, desired)
     if base is None:
         validate_text(live, desired)
         if live == desired:
@@ -499,8 +560,7 @@ def resolution_inputs(home, old, new, filename):
     desired = desired_path.read_bytes()
     live = base64.b64decode(state["data"])
     validate_text(base if base is not None else b"", live, desired)
-    if name.endswith(".json"):
-        parse_json(desired)
+    validate_format(name, desired)
     return name, state, base, live, desired
 
 
@@ -516,8 +576,7 @@ def resolve(home, old, new, filename, replace=True):
 
 
 def approve_candidate(home, name, state, base, live, desired, result, workspace=None):
-    if name.endswith(".json"):
-        parse_json(result)
+    validate_format(name, result)
     path = target(home, name)
     receipt_path = approval_path(home, name)
     receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -641,11 +700,12 @@ def accept_conflict(home, old, new, directory, confirm=None):
         raise Divergence("Candidate must be a regular file.")
     candidate = base64.b64decode(candidate_state["data"])
     validate_text(candidate)
-    if name.endswith(".json"):
-        parse_json(candidate)
+    validate_format(name, candidate)
     validation = (
         "JSON syntax validated"
         if name.endswith(".json")
+        else "TOML syntax validated"
+        if name.endswith(".toml")
         else "no format validation performed"
     )
     print(f"Review candidate for {target(home, name)} ({validation}):")
@@ -749,9 +809,8 @@ def check(home, old, new):
                     else merge(base, live, desired, name)
                 )
                 if approval:
-                    if name.endswith(".json"):
-                        parse_json(desired)
-                        parse_json(result)
+                    validate_format(name, desired)
+                    validate_format(name, result)
                     print(
                         f"RESOLUTION APPROVED: {path}\nBackup: {approval['backup']}",
                         file=sys.stderr,
