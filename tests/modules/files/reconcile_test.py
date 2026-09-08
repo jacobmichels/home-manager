@@ -311,6 +311,90 @@ class Reconciliation(unittest.TestCase):
                          {"local": True, "server": {"url": "two"}})
         self.assertTrue(live.read_bytes().startswith(b'# keep\n'))
 
+    def test_ini_adoption_activation_and_permissions_for_managed_targets(self):
+        for i, name in enumerate((".config/gtk-3.0/settings.ini", ".thunderbird/profiles.ini",
+                                  ".config/mimeapps.list", ".local/share/applications/app.desktop")):
+            with self.subTest(name=name):
+                first = self.generation(f"ini-first-{i}", b'[Settings]\nName=one\n', filename=name)
+                second = self.generation(f"ini-second-{i}", b'[Settings]\nName=two\n', filename=name)
+                live = self.home / name
+                live.parent.mkdir(parents=True, exist_ok=True)
+                live.write_bytes(b'# local\n[Settings]\nLocal=kept\n')
+                live.chmod(0o640)
+                self.activate("", first)
+                self.activate(first, second)
+                self.assertEqual(live.read_bytes(), b'# local\n[Settings]\nLocal=kept\nName=two\n')
+                self.assertEqual(live.stat().st_mode & 0o777, 0o640)
+
+    def test_ini_creation_migration_and_conflicts_validate_before_writing(self):
+        name = "settings.ini"
+        old = self.generation("old", b'[Settings]\nName=one\n', False, name)
+        new = self.generation("new", b'[Settings]\nName=two\n', filename=name)
+        live = self.home / name
+        self.activate("", new)
+        self.assertEqual(live.read_bytes(), b'[Settings]\nName=two\n')
+        live.unlink()
+        live.symlink_to(Path(old) / "home-files" / name)
+        self.activate(old, new)
+        self.assertFalse(live.is_symlink())
+        live.unlink()
+        declared = Path(new) / "home-files" / name
+        declared.write_bytes(b'[Settings]\nName=secret\nName=duplicate\n')
+        with self.assertRaisesRegex(r.Divergence, "duplicate INI key"):
+            self.activate("", new)
+        self.assertFalse(live.exists())
+        live.symlink_to(Path(old) / "home-files" / name)
+        with self.assertRaisesRegex(r.Divergence, "duplicate INI key"):
+            self.activate(old, new)
+        self.assertTrue(live.is_symlink())
+        live.unlink()
+        declared.write_bytes(b'[Settings]\nName=two\n')
+        (Path(old) / "reconciliation.json").write_text(json.dumps([name]))
+        (Path(new) / "home-files/aaa").write_bytes(b"create me")
+        (Path(new) / "reconciliation.json").write_text(json.dumps(["aaa", name]))
+        for content in (b'[Settings]\nName=local\n', b'Name=ungrouped\n'):
+            live.write_bytes(content)
+            before = r.snapshot(live)
+            with self.assertRaises(r.Divergence):
+                self.activate(old, new)
+            self.assertEqual(r.snapshot(live), before)
+            self.assertFalse((self.home / "aaa").exists())
+
+    def test_ini_resolution_validates_candidates_desired_and_legacy_approvals(self):
+        name = "settings.ini"
+        old = self.generation("old", b'[Settings]\nName=one\n', filename=name)
+        new = self.generation("new", b'[Settings]\nName=two\n', filename=name)
+        live = self.home / name
+        live.write_bytes(b'Name=ungrouped\n')
+        workspace = r.export_conflict(self.home, old, new, name)
+        confirm = mock.Mock(return_value="yes")
+        with self.assertRaisesRegex(r.Divergence, "invalid INI"):
+            r.accept_conflict(self.home, old, new, workspace, confirm)
+        confirm.assert_not_called()
+        self.assertFalse(r.approval_path(self.home, name).exists())
+        (workspace / "candidate").write_bytes(b'[Settings]\nName=two\nLocal=kept\n')
+        output = self.notice_output(lambda: r.accept_conflict(self.home, old, new, workspace, confirm))
+        self.assertIn("INI structure validated", output)
+        self.activate(old, new)
+        self.assertIn(b'Local=kept', live.read_bytes())
+
+        declared = Path(new) / "home-files" / name
+        declared.write_bytes(b'Name=ungrouped\n')
+        with self.assertRaisesRegex(r.Divergence, "invalid INI"):
+            r.resolve(self.home, old, new, name)
+        with self.assertRaisesRegex(r.Divergence, "invalid INI"):
+            r.export_conflict(self.home, old, new, name)
+        declared.write_bytes(b'[Settings]\nName=two\n')
+        r.resolve(self.home, old, new, name)
+        receipt_path = r.approval_path(self.home, name)
+        receipt = json.loads(receipt_path.read_text())
+        receipt["result"] = r.encode(b'Name=ungrouped\n')
+        receipt_path.write_text(json.dumps(receipt))
+        before = r.snapshot(live)
+        with self.assertRaisesRegex(r.Divergence, "invalid INI"):
+            self.activate(old, new)
+        self.assertEqual(r.snapshot(live), before)
+
     def activate(self, old, new):
         r.apply(self.home, r.check(self.home, old, new))
 
@@ -1219,6 +1303,81 @@ class TomlMerge(unittest.TestCase):
         with self.assertRaisesRegex(r.Divergence, "'/a~1b~0'") as caught:
             self.merge(b'"a/b~"="base"', b'"a/b~"="secret1"', b'"a/b~"="secret2"')
         self.assertNotIn("secret", str(caught.exception))
+
+
+class IniMerge(unittest.TestCase):
+    def test_independent_keys_preserve_comments_case_locales_and_order(self):
+        base = b'[Desktop Entry]\nName=App\nExec=app %U\n'
+        live = b'# keep\n[Desktop Entry]\nName=Local\nName[fr]=Appli\nExec=app %U\n'
+        desired = b'[Desktop Entry]\nName=App\nExec=app --new %U\nIcon=app\n'
+        self.assertEqual(r.merge(base, live, desired, "app.desktop"),
+                         live.replace(b'Exec=app %U', b'Exec=app --new %U') + b'Icon=app\n')
+        live = b'; keep\r\n[Settings]\r\nName = value\r\nname=distinct\r\n'
+        self.assertEqual(r.merge(b'[Settings]\nName=value\n', live,
+                                b'[Settings]\nName = value\n', "settings.ini"), live)
+
+    def test_additions_deletions_empty_sections_and_missing_final_newline(self):
+        cases = [
+            (b'[A]\nx=1\ny=2\n', b'[A]\nx=1\ny=2\nlocal=3', b'[A]\ny=4\n',
+             b'[A]\ny=4\nlocal=3'),
+            (b'[A]\nx=1\n', b'[A]\nx=1', b'[A]\nx=1\ny=2', b'[A]\nx=1\ny=2'),
+            (b'[A]\nx=1\n[B]\ny=2\n', b'[B]\ny=2\n', b'[A]\nx=1\n[B]\ny=3\n',
+             b'[B]\ny=3\n'),
+            (b'[A]\nx=1\n', b'[A]\nx=1\n[Local]\n', b'[Added]\nz=2\n',
+             b'[Local]\n[Added]\nz=2\n'),
+            (None, b'# local\n[Local]\nx=1', b'[Added]\nz=2\n',
+             b'# local\n[Local]\nx=1\n[Added]\nz=2\n'),
+            (b'', b'[A]\nlocal=1\n', b'[A]\nnix=2\n', b'[A]\nlocal=1\nnix=2\n'),
+        ]
+        for base, live, desired, expected in cases:
+            with self.subTest(live=live):
+                self.assertEqual(r.merge(base, live, desired, "profiles.ini"), expected)
+
+    def test_values_are_literal_including_lists_escapes_and_trailing_whitespace(self):
+        values = [b'app.desktop;other.desktop;', b'%U # literal ; suffix', b'\\shello\\nworld\\s',
+                  b'"quoted"', b'a=b=c', b' ', 'café\u2028suite'.encode()]
+        for value in values:
+            with self.subTest(value=value):
+                live = b'[Default Applications]\ntext/plain=' + value + b'\n'
+                desired = b'[Default Applications]\nimage/png=image.desktop;\n'
+                merged = r.merge(None, live, desired, "mimeapps.list")
+                self.assertEqual(merged, live + b'image/png=image.desktop;\n')
+        with self.assertRaisesRegex(r.Divergence, "conflicting INI edits"):
+            r.merge(b'[A]\nx=value\n', b'[A]\nx=value \n', b'[A]\nx=other\n', "a.ini")
+
+    def test_conflicts_for_values_lists_deletions_and_adoption(self):
+        for base, live, desired in [
+            (b'[A]\nx=1\n', b'[A]\nx=2\n', b'[A]\nx=3\n'),
+            (b'[A]\nx=1\n', b'[A]\n', b'[A]\nx=2\n'),
+            (b'[A]\nx=1\n', b'', b'[A]\nx=2\n'),
+            (b'[A]\nx=1\n', b'[A]\nx=2\n', b''),
+            (b'[A]\nx=a;b;\n', b'[A]\nx=c;a;b;\n', b'[A]\nx=a;b;d;\n'),
+            (None, b'[A]\nx=local\n', b'[A]\nx=nix\n'),
+        ]:
+            with self.subTest(live=live), self.assertRaisesRegex(r.Divergence, "conflicting INI edits"):
+                r.merge(base, live, desired, "settings.ini")
+
+    def test_invalid_and_ambiguous_inputs_never_fall_back_even_when_equal(self):
+        invalid = [b'[A]\nx=1\nx=2', b'[A]\nx=1\n[A]\ny=2', b'key=ungrouped',
+                   b'[A]\nkey: value', b'[A]\nkey=value\n continuation', b'[A]\n=empty-key',
+                   b'[broken', b'[]\nx=1', b'[A]\nx=one\rtwo', b'\xff', b'[A]\nx=\x00']
+        for value in invalid:
+            for inputs in ((value, value, value), (value, b'', b''),
+                           (b'', value, b''), (b'', b'', value), (None, value, b'')):
+                with self.subTest(inputs=inputs), self.assertRaises(r.Divergence):
+                    r.merge(*inputs, name="settings.ini")
+
+    def test_other_dialects_and_backup_names_still_use_text(self):
+        for name in ("settings.ini.backup", "app.desktop.backup", "mimeapps.list.backup",
+                     ".config/git/config", "sops.service", "hyprland.conf", ".config/ghostty/config"):
+            with self.subTest(name=name):
+                self.assertEqual(r.merge(b'x=1\n', b'x=1\n', b'x=2\n', name), b'x=2\n')
+
+    def test_errors_do_not_leak_values(self):
+        for live in (b'[A]\nx=secret1\n', b'[A]\nx=secret1\nx=secret2\n'):
+            with self.assertRaises(r.Divergence) as caught:
+                r.merge(b'[A]\nx=base\n', live, b'[A]\nx=secret3\n', "settings.ini")
+            self.assertNotIn("secret", str(caught.exception))
 
 
 if __name__ == "__main__":

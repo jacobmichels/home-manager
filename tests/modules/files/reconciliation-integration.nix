@@ -26,6 +26,23 @@ let
   conflict = make "theme=catppuccin\nfont=16\n" true;
   immutable = make "theme=light\nfont=14\n" false;
   removed = make null false;
+  ini =
+    font:
+    (import ../../../modules {
+      inherit pkgs;
+      configuration = {
+        home.username = "hm-test";
+        home.homeDirectory = "/homeless-shelter";
+        home.stateVersion = "25.05";
+        manual.manpages.enable = false;
+        xdg.configFile."gtk-3.0/settings.ini" = {
+          text = "[Settings]\ngtk-font-name=${font}\n";
+          reconciliation.enable = true;
+        };
+      };
+    }).config;
+  iniFirst = ini "Sans 10";
+  iniSecond = ini "Sans 12";
   global =
     (import ../../../modules {
       inherit pkgs;
@@ -122,6 +139,21 @@ pkgs.runCommand "reconciliation-integration"
     test -s "$TMPDIR/finish.sh"
     mkdir "$TMPDIR/finish-home"
     env -u PYTHONPATH -u PYTHONHOME HOME="$TMPDIR/finish-home" reconciliationPlan='[]' bash "$TMPDIR/finish.sh"
+    # Adopt and update real GTK-style settings without losing the local theme.
+    export HOME="$TMPDIR/ini-home"
+    mkdir -p "$HOME/.config/gtk-3.0"
+    printf '# local theme\n[Settings]\ngtk-theme-name=Adwaita\n' > "$HOME/.config/gtk-3.0/settings.ini"
+    ${activate iniFirst} ""
+    ${activate iniSecond} ${generation iniFirst}
+    printf '# local theme\n[Settings]\ngtk-theme-name=Adwaita\ngtk-font-name=Sans 12\n' > "$TMPDIR/ini-expected"
+    cmp "$HOME/.config/gtk-3.0/settings.ini" "$TMPDIR/ini-expected"
+    sed -i 's/Sans 12/Sans 14/' "$HOME/.config/gtk-3.0/settings.ini"
+    cp "$HOME/.config/gtk-3.0/settings.ini" "$TMPDIR/ini-before"
+    rm "$HOME/write-boundary"
+    if ${activate iniFirst} ${generation iniSecond} > "$TMPDIR/ini-log" 2>&1; then exit 1; fi
+    grep -q 'conflicting INI edits' "$TMPDIR/ini-log"
+    cmp "$HOME/.config/gtk-3.0/settings.ini" "$TMPDIR/ini-before"
+    test ! -e "$HOME/write-boundary"
     export HOME="$TMPDIR/home"
     mkdir "$HOME"
     ${generation first}/reconcile --check
