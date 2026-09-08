@@ -133,9 +133,13 @@ in
   };
 
   config = {
-    warnings = lib.optional (config.home.fileReconciliation.enable && config.home.fileReconciliation.exclude != [ ])
-      ("Files excluded from the writable reconciliation default: "
-        + lib.concatStringsSep ", " config.home.fileReconciliation.exclude);
+    warnings =
+      lib.optional
+        (config.home.fileReconciliation.enable && config.home.fileReconciliation.exclude != [ ])
+        (
+          "Files excluded from the writable reconciliation default: "
+          + lib.concatStringsSep ", " config.home.fileReconciliation.exclude
+        );
     assertions = [
       (
         let
