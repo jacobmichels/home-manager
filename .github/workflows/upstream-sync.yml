@@ -2,20 +2,21 @@ name: Validate upstream sync
 
 on:
   push:
-    branches: [automation/upstream-sync]
+    branches: [automation/upstream-sync, automation/upstream-sync-release-26.05]
 
 permissions:
   contents: read
 
 concurrency:
-  group: upstream-sync-validation
+  group: upstream-sync-validation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
     if: >-
       github.repository == 'jacobmichels/home-manager' &&
-      github.ref == 'refs/heads/automation/upstream-sync'
+      (github.ref == 'refs/heads/automation/upstream-sync' ||
+       github.ref == 'refs/heads/automation/upstream-sync-release-26.05')
     strategy:
       fail-fast: false
       matrix:
@@ -38,3 +39,8 @@ jobs:
         run: >-
           nix build --no-link --show-trace
           .#test-fish-suppress-greeting .#test-fish-functions .#docs-jsonModuleMaintainers
+      - name: Test writable-file reconciliation
+        run: python3 tests/modules/files/reconcile_test.py
+      - name: Test reconciliation activation
+        if: runner.os == 'Linux'
+        run: nix build --no-link --show-trace .#integration-test-files-reconciliation
